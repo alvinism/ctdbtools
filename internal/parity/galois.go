@@ -36,6 +36,7 @@ func (g *Galois) ExpTbl() []uint16 { return g.expTbl }
 func (g *Galois) LogTbl() []uint16 { return g.logTbl }
 func (g *Galois) toExp(a int) int  { return int(g.expTbl[a]) }
 func (g *Galois) toLog(a int) int  { return int(g.logTbl[a]) }
+func (g *Galois) MaxVal() int      { return g.max }
 func (g *Galois) toPos(length, a int) int {
 	return length - 1 - g.toLog(a)
 }
@@ -67,6 +68,10 @@ func (g *Galois) divExp(a, b int) int {
 	}
 	return int(g.expTbl[int(g.logTbl[a])-b+g.max])
 }
+
+// Exported wrappers
+func (g *Galois) MulExp(a, b int) int { return g.mulExp(a, b) }
+func (g *Galois) DivExp(a, b int) int { return g.divExp(a, b) }
 
 // gfconv multiplies polynomials represented in log form (-1 is -Inf).
 func (g *Galois) gfconv(a, b []int, length int) []int {

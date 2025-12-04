@@ -91,6 +91,7 @@ func (ps *ParityState) SyndromeWithOffset(offset int, strides int) [][]uint16 {
 		if part >= ps.Stride+offset*2 {
 			for i := 0; i < ps.MaxNpar; i++ {
 				synI := int(syn[part2][i])
+				// subtract leadout and leadin, then divide by a^i
 				synI ^= int(ps.leadOut[ps.LastStride+ps.Stride-part-1]) ^ g.MulExp(int(ps.leadIn[part]), (i*ps.strideCount)%g.MaxVal())
 				synI = g.DivExp(synI, i)
 				syn[part2][i] = uint16(synI)

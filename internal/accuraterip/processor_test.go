@@ -66,6 +66,11 @@ func TestProcessorMultiTrackParityOffset(t *testing.T) {
 	if p.Syndrome() == nil {
 		t.Fatalf("expected syndrome after multi-track feed")
 	}
+
+	// Offset CRCs differ
+	if p.CRC(1) == p.CRC(0) {
+		t.Fatalf("expected offset crc difference track2")
+	}
 }
 
 func tocLayoutSingle() toc.Layout {
