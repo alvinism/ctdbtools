@@ -15,4 +15,4 @@
 - Added lead-in/out-aware parity aggregator with tail stride support and offset-adjusted syndromes (mirrors CUETools leadin/leadout adjustments), with tests kept green.
 - Added multi-track parity/CRC tests and initial ingestion scaffold: ffmpeg PCM decoder and minimal cue parser.
 - Added more parity offset/lead-out tests plus PCM ingestion runner and CLI verify scaffold (no CTDB/AR network yet).
-- Current focus: tighten parity window rules (lead-in/out, stride/laststride) and offset syndromes across multi-track layouts; upgrade cue parsing and wire ingestion to CLI verify.
+- Current focus: tighten parity window rules and offset corrections exactly like CUETools CalculateCRCs/GetSyndrome (including leadin/leadout adjustments for offsets, stride/laststride windows across tracks); expand synthetic multi-track tests; replace minimal cue parser and wire ffmpeg→processor into CLI verify; CTDB/AR network still pending.
