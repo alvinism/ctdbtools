@@ -43,6 +43,31 @@ func TestProcessorLeadInSkipParity(t *testing.T) {
 	p.Feed([]uint32{0x00010002, 0x00030004, 0x00050006, 0x00070008})
 }
 
+func TestProcessorMultiTrackParityOffset(t *testing.T) {
+	layout := tocLayoutTwoTracks()
+	p := NewProcessor(layout, 4, 2, 4, true)
+
+	// Track 1 with pregap=1 frame, length=2 frames
+	p.StartTrack(1, -1, -1)
+	p.Feed([]uint32{0x00010002, 0x00030004, 0x00050006})
+	crc1 := p.CRC(0)
+	if crc1 == 0 {
+		t.Fatalf("expected crc for track1")
+	}
+
+	// Track 2 with no pregap, length=2 frames
+	p.StartTrack(2, -1, -1)
+	p.Feed([]uint32{0x00070008, 0x0009000A})
+	crc2 := p.CRC(0)
+	if crc2 == 0 || crc2 == crc1 {
+		t.Fatalf("expected different crc for track2")
+	}
+
+	if p.Syndrome() == nil {
+		t.Fatalf("expected syndrome after multi-track feed")
+	}
+}
+
 func tocLayoutSingle() toc.Layout {
 	return toc.Layout{
 		FirstAudio:  1,
@@ -50,6 +75,18 @@ func tocLayoutSingle() toc.Layout {
 		Leadout:     3,
 		Tracks: []toc.Track{
 			{Start: 0, Length: 3, IsAudio: true, Pregap: 1},
+		},
+	}
+}
+
+func tocLayoutTwoTracks() toc.Layout {
+	return toc.Layout{
+		FirstAudio:  1,
+		AudioTracks: 2,
+		Leadout:     5,
+		Tracks: []toc.Track{
+			{Start: 0, Length: 2, IsAudio: true, Pregap: 1},
+			{Start: 2, Length: 2, IsAudio: true, Pregap: 0},
 		},
 	}
 }
