@@ -26,6 +26,8 @@ func NewParityAggregator(stride, lastStride, npar int) *ParityAggregator {
 	}
 }
 
+func (p *ParityAggregator) LastStride() int { return p.lastStride }
+
 // FeedSamples consumes samples at a global sample offset (stereo samples) and updates parity.
 // leadInSamples and leadOutSamples can be used to skip parity outside data region.
 func (p *ParityAggregator) FeedSamples(globalSampleOffset int, samples []uint32, leadInSamples int, leadOutSamples int, totalSamples int) {

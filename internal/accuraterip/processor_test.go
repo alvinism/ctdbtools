@@ -25,7 +25,7 @@ func TestProcessorCRCFlow(t *testing.T) {
 func TestProcessorLeadInSkipParity(t *testing.T) {
 	layout := tocLayoutSingle()
 	p := NewProcessor(layout, 4, 2, 4, true)
-	// auto derive lead-in from Pregap (1 frame -> 588 samples)
+	// auto derive lead-in from Pregap (1 frame -> 588 samples), lead-out defaults to lastStride (2)
 	p.StartTrack(1, -1, -1)
 	p.Feed([]uint32{0x00000000, 0x00010002}) // first sample within lead-in should be skipped
 	syn := p.Syndrome()
@@ -37,6 +37,10 @@ func TestProcessorLeadInSkipParity(t *testing.T) {
 	} else if !syndromeAllZero(tail) {
 		t.Fatalf("expected tail parity to be zero as well")
 	}
+
+	// feed data excluding lead-out (totalSamples=3*588, leadOut=2 -> last 2 samples skipped)
+	p.StartTrack(1, -1, -1)
+	p.Feed([]uint32{0x00010002, 0x00030004, 0x00050006, 0x00070008})
 }
 
 func tocLayoutSingle() toc.Layout {
