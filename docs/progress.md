@@ -14,3 +14,4 @@
 - Created detailed plan in `docs/plan.md` to track remaining algorithm and ingestion/CLI work. Started parity feed lead-in/out skipping; processor scaffolding combines rolling CRC and parity.
 - Added lead-in/out-aware parity aggregator with tail stride support and offset-adjusted syndromes (mirrors CUETools leadin/leadout adjustments), with tests kept green.
 - Added multi-track parity/CRC tests and initial ingestion scaffold: ffmpeg PCM decoder and minimal cue parser.
+- Added more parity offset/lead-out tests plus PCM ingestion runner and CLI verify scaffold (no CTDB/AR network yet).
