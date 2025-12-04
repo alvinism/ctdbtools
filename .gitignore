@@ -1,6 +1,7 @@
 # build artifacts
 /bin/
 /dist/
+/ctdbtool
 *.exe
 *.dll
 *.so
@@ -24,4 +25,8 @@ vendor/
 # local refs
 refs/
 
+# test materials
 materials/
+
+# reference source code
+cuetools.net/
