@@ -12,20 +12,22 @@ type ParityState struct {
 	EncodeTab  [][][]uint16
 	MaxNpar    int
 
-	leadIn  []uint16
-	leadOut []uint16
+	leadIn      []uint16
+	leadOut     []uint16
+	strideCount int
 }
 
 // NewParityState initializes parity buffer and encode table for given stride/npar.
 func NewParityState(stride int, npar int) *ParityState {
 	ps := &ParityState{
-		Stride:     stride,
-		LastStride: stride,
-		MaxNpar:    npar,
-		ParityBuf:  make([]byte, stride*npar*2),
-		EncodeTab:  parity.Galois16.MakeEncodeTable(npar),
-		leadIn:     make([]uint16, maxInt(4096*4, stride*2)),
-		leadOut:    make([]uint16, maxInt(4096*4, stride+stride)),
+		Stride:      stride,
+		LastStride:  stride,
+		MaxNpar:     npar,
+		ParityBuf:   make([]byte, stride*npar*2),
+		EncodeTab:   parity.Galois16.MakeEncodeTable(npar),
+		leadIn:      make([]uint16, maxInt(4096*4, stride*2)),
+		leadOut:     make([]uint16, maxInt(4096*4, stride+stride)),
+		strideCount: 1,
 	}
 	return ps
 }
@@ -82,14 +84,14 @@ func (ps *ParityState) SyndromeWithOffset(offset int, strides int) [][]uint16 {
 			for i := 0; i < ps.MaxNpar; i++ {
 				synI := int(syn[part2][i])
 				synI = g.MulExp(synI, i)
-				synI ^= int(ps.leadOut[ps.LastStride-part-1]) ^ g.MulExp(int(ps.leadIn[ps.Stride+part]), (i*1)%g.MaxVal()) // stridecount assumed 1
+				synI ^= int(ps.leadOut[ps.LastStride-part-1]) ^ g.MulExp(int(ps.leadIn[ps.Stride+part]), (i*ps.strideCount)%g.MaxVal())
 				syn[part2][i] = uint16(synI)
 			}
 		}
 		if part >= ps.Stride+offset*2 {
 			for i := 0; i < ps.MaxNpar; i++ {
 				synI := int(syn[part2][i])
-				synI ^= int(ps.leadOut[ps.LastStride+ps.Stride-part-1]) ^ g.MulExp(int(ps.leadIn[part]), (i*1)%g.MaxVal())
+				synI ^= int(ps.leadOut[ps.LastStride+ps.Stride-part-1]) ^ g.MulExp(int(ps.leadIn[part]), (i*ps.strideCount)%g.MaxVal())
 				synI = g.DivExp(synI, i)
 				syn[part2][i] = uint16(synI)
 			}
