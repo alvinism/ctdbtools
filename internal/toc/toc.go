@@ -56,6 +56,15 @@ func (l Layout) TrackCount() int {
 	return len(l.Tracks)
 }
 
+// TrackStartFrame returns the start frame for a 1-based audio track number.
+func (l Layout) TrackStartFrame(track int) int {
+	idx := track + l.FirstAudio - 2
+	if idx < 0 || idx >= len(l.Tracks) {
+		return 0
+	}
+	return l.Tracks[idx].Start
+}
+
 // TOCID computes the CUETools TOCID string for the layout.
 // Mirrors CUETools.CDImage/CDImage.cs property TOCID.
 func (l Layout) TOCID() (string, error) {

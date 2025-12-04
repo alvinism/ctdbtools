@@ -1,9 +1,12 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os/exec"
+	"strconv"
+	"strings"
 )
 
 // PCMStream invokes ffmpeg to decode an input file to 16-bit stereo PCM @ 44.1kHz, returning a reader.
@@ -45,4 +48,28 @@ func PCMChunk(r io.Reader, buf []uint32) (int, error) {
 		return samples, io.EOF
 	}
 	return samples, nil
+}
+
+// ProbeDurationFrames uses ffprobe to get the duration of an audio file in CD frames (1/75 sec).
+func ProbeDurationFrames(ctx context.Context, input string) (int, error) {
+	args := []string{
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		input,
+	}
+	cmd := exec.CommandContext(ctx, "ffprobe", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return 0, err
+	}
+	durStr := strings.TrimSpace(out.String())
+	dur, err := strconv.ParseFloat(durStr, 64)
+	if err != nil {
+		return 0, err
+	}
+	// Convert seconds to CD frames (75 Hz)
+	frames := int(dur*75 + 0.5) // round to nearest
+	return frames, nil
 }

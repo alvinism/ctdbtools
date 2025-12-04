@@ -1,6 +1,7 @@
 package network
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/xml"
@@ -96,8 +97,19 @@ func (c *ctdbClient) Lookup(ctx context.Context, opts CTDBLookupOptions) (*CTDBR
 		return nil, fmt.Errorf("ctdb: HTTP %d", resp.StatusCode)
 	}
 
+	// Handle gzip-compressed responses
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("ctdb: gzip error: %w", err)
+		}
+		defer gzReader.Close()
+		reader = gzReader
+	}
+
 	// Read and parse XML response
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}

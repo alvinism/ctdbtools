@@ -24,7 +24,8 @@ func TestRollingOffsetCRCs(t *testing.T) {
 
 	// three stereo samples (represent a single frame for brevity)
 	samples := []uint32{0x00010002, 0x00030004, 0x00050006}
-	rt.FeedSamples(1, 0, samples)
+	trackTotalSamples := 3 * 588 // 3 frames
+	rt.FeedSamples(1, 0, trackTotalSamples, samples)
 
 	crc0 := rt.CRCWithOffset(1, 0, &toc)
 	crcFwd := rt.CRCWithOffset(1, 1, &toc)

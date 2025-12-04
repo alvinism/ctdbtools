@@ -66,7 +66,7 @@ func (p *Processor) parityLastStride() int {
 
 // Feed consumes PCM stereo samples for the current track.
 func (p *Processor) Feed(samples []uint32) {
-	p.rolling.FeedSamples(p.currentTrack, p.trackSamples, samples)
+	p.rolling.FeedSamples(p.currentTrack, p.trackSamples, p.totalSamples, samples)
 	if p.parity != nil {
 		p.parity.FeedSamples(samples)
 	}
@@ -115,4 +115,53 @@ func (p *Processor) OffsetSyndrome(offset int, strides int) [][]uint16 {
 // Parity returns the underlying parity aggregator (may be nil if calcParity was false).
 func (p *Processor) Parity() *ParityAggregator {
 	return p.parity
+}
+
+// TrackCRC returns CRC32 at the given offset for a specific track (1-based).
+func (p *Processor) TrackCRC(track int, offset int) uint32 {
+	return p.rolling.CRCWithOffset(track, offset, &p.layout)
+}
+
+// TrackCRCWONULL returns CRC32 without nulls at the given offset for a specific track.
+func (p *Processor) TrackCRCWONULL(track int, offset int) uint32 {
+	return p.rolling.CRCWONULLWithOffset(track, offset, &p.layout)
+}
+
+// TrackCRCAR returns the AccurateRip v1 CRC for a specific track at zero offset.
+// track is 1-based audio track number.
+func (p *Processor) TrackCRCAR(track int) uint32 {
+	// Convert to 0-based index for CRCARWithOffset
+	return p.rolling.CRCARWithOffset(track-1, 0, &p.layout)
+}
+
+// TrackCRCV2 returns the AccurateRip v2 CRC for a specific track.
+// track is 1-based audio track number.
+func (p *Processor) TrackCRCV2(track int) uint32 {
+	// Convert to 0-based index for CRCV2WithOffset
+	return p.rolling.CRCV2WithOffset(track-1, &p.layout)
+}
+
+// Layout returns the TOC layout used by this processor.
+func (p *Processor) Layout() toc.Layout {
+	return p.layout
+}
+
+// Rolling returns the rolling tables for debug inspection.
+func (p *Processor) Rolling() *RollingTables {
+	return p.rolling
+}
+
+// TrackCTDBCRC returns CTDB-style CRC for a track with prefix/suffix skipping.
+// track is 1-based audio track number.
+// offset is drive offset in samples.
+// stride and laststride are parity parameters (samples); the function uses stride/2 and laststride/2.
+func (p *Processor) TrackCTDBCRC(track, offset, stride, laststride int) uint32 {
+	return p.rolling.CTDBCRCWithOffset(track, offset, stride/2, laststride/2, &p.layout)
+}
+
+// DiscCTDBCRC returns CTDB-style CRC for the whole disc.
+// offset is drive offset in samples.
+// stride and laststride are parity parameters (samples); the function uses stride/2 and laststride/2.
+func (p *Processor) DiscCTDBCRC(offset, stride, laststride int) uint32 {
+	return p.rolling.CTDBCRCWithOffset(0, offset, stride/2, laststride/2, &p.layout)
 }

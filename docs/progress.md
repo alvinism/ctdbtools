@@ -57,4 +57,72 @@
 
 **Key Reference**: CueTools `AccurateRip.cs` lines 829-903 (URL/response), `CUEToolsDB.cs` lines 77-83 (lookup URL)
 
-**Next steps**: CLI framework with `flag` package, error correction/repair workflow, multi-track CRC comparison.
+## 2024-12-04 (CLI Wiring Complete)
+- Wired CLI entry point using Cobra framework (`internal/cli/execute.go`)
+- Added `github.com/spf13/cobra` dependency
+- Implemented `verify` subcommand with flags:
+  - `-c, --cue`: Path to CUE file (required)
+  - `--ar`: Query AccurateRip database
+  - `--ctdb`: Query CTDB database
+  - `-v, --verbose`: Verbose output
+  - `--parity`: Calculate parity/syndrome
+  - `--stride`, `--last-stride`, `--npar`: Parity parameters
+- Added signal handling for graceful cancellation
+- Added file existence validation
+
+**Verify feature is now complete and ready for real-world testing.**
+
+## 2024-12-04 (CTDB Verification Display)
+- Added `CTDBCRCWithOffset()` to `internal/accuraterip/rolling.go` for CTDB-style CRC with prefix/suffix skipping
+- Added `TrackCTDBCRC()` and `DiscCTDBCRC()` to processor for easy CTDB CRC computation
+- Added `TrackStartFrame()` helper to `internal/toc/toc.go`
+- Updated `queryCTDB()` in CLI to display per-track verification status against CTDB entries
+- Aggregates match counts across all CTDB entries with confidence weighting
+
+**Test Results:**
+- AccurateRip: Works perfectly on all test albums (V6, LAST LOVE)
+- CTDB: Middle tracks verified correctly on LAST LOVE (tracks 2-12 all 7/7)
+- Known limitation: First/last track CTDB CRC calculations need further investigation
+  - Last track suffix handling may have edge case issues
+  - V6 CTDB entries appear to be from different source rips (none match our audio)
+
+## 2024-12-05 (Split Track Support)
+- Implemented full split track support for CUE sheets with multiple FILE directives
+- Created `internal/ingest/source.go`:
+  - `SourceSegment` struct: FilePath, Offset, Length for audio segments
+  - `CueSheet` struct: embeds Layout with CueDir, Sources, and AudioLayout
+  - Helper methods: `IsSplitTrack()`, `SingleFilePath()`, `GetAudioLayout()`
+- Created `internal/ingest/multisource.go`:
+  - `MultiSourceReader`: sequentially reads audio from multiple files
+  - Automatically switches FFmpeg streams when source length exhausted
+  - Handles offset skipping for tracks starting mid-file
+- Updated `internal/ingest/cue.go`:
+  - Added `ParseCueSheet()` and `ParseCueSheetFile()` functions
+  - Parses FILE directives and builds source mappings
+  - Handles INDEX 00/01 positions for track boundaries
+- Updated `internal/ingest/orchestrator.go`:
+  - Added `ProcessCueSheet()` for both single-file and split-track CUEs
+  - Uses AudioLayout for CRC calculation with proper track lengths
+- Updated `internal/cli/commands.go`:
+  - Modified `Verify()` to use CueSheet parsing
+  - Added `probeSplitTrackDurations()` to probe file durations with ffprobe
+  - Audio file argument now optional for split track CUEs
+- Updated `internal/cli/execute.go`:
+  - Changed args from `ExactArgs(1)` to `MaximumNArgs(1)` for split tracks
+
+**Key Technical Insight**: For split track CUEs, CueTools uses the ENTIRE FILE for each track's CRC calculation, including any embedded pregap at the end of the file (the pregap for the next track). Track boundaries in the CUE (INDEX 00) don't affect CRC calculation - each file is processed in full.
+
+**Test Results:**
+- Split track CUE (希望子午線 〜ホライズン・ブルー〜): All 4 tracks verified against AccurateRip ✓
+- Single-file CUEs still work correctly (V6, LAST LOVE albums verified) ✓
+- CTDB: Tracks 1-3 match, track 4 and disc CRC have known last-track issues
+
+## Roadmap
+
+1. **[CURRENT] Fix CTDB first/last track CRC** - Investigate prefix/suffix calculation discrepancy
+2. **[DONE] Add split-track album support** - Handle multi-FILE CUE sheets ✓
+3. **[FUTURE] Implement Repair** - Reed-Solomon error correction
+   - Port `calcSigmaMBM()` (Berlekamp-Massey) from `RsDecode.cs`
+   - Port `chienSearch()` for error locations
+   - Port `doForney()` for error magnitudes
+   - Implement CDRepairFix equivalent
