@@ -1,18 +1,25 @@
 package ingest
 
 import (
+	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"ctdbtool/internal/toc"
 )
 
-// ParseCueMinimal parses a minimal cuesheet-like track layout (supports TRACK/PREGAP/INDEX 01 start times).
-// This is a simplified placeholder; for full coverage we should replace with a robust parser.
+var timeRe = regexp.MustCompile(`(\d+):(\d+):(\d+)`)
+
+// ParseCueMinimal parses TRACK/PREGAP/INDEX 01 start times into a toc.Layout.
 func ParseCueMinimal(lines []string) (toc.Layout, error) {
 	var tracks []toc.Track
 	var current toc.Track
+	var leadoutFrames int
 	for _, ln := range lines {
 		ln = strings.TrimSpace(ln)
 		if strings.HasPrefix(ln, "TRACK") {
@@ -20,14 +27,18 @@ func ParseCueMinimal(lines []string) (toc.Layout, error) {
 				tracks = append(tracks, current)
 			}
 			current = toc.Track{IsAudio: true}
+		} else if strings.HasPrefix(ln, "REM LEAD-OUT") {
+			if f, ok := parseFrames(ln[len("REM LEAD-OUT"):]); ok {
+				leadoutFrames = f
+			}
 		} else if strings.HasPrefix(ln, "PREGAP") {
-			var mm, ss, ff int
-			fmt.Sscanf(ln, "PREGAP %02d:%02d:%02d", &mm, &ss, &ff)
-			current.Pregap = mm*60*75 + ss*75 + ff
+			if f, ok := parseFrames(strings.TrimPrefix(ln, "PREGAP")); ok {
+				current.Pregap = f
+			}
 		} else if strings.HasPrefix(ln, "INDEX 01") {
-			var mm, ss, ff int
-			fmt.Sscanf(ln, "INDEX 01 %02d:%02d:%02d", &mm, &ss, &ff)
-			current.Start = mm*60*75 + ss*75 + ff
+			if f, ok := parseFrames(strings.TrimPrefix(ln, "INDEX 01")); ok {
+				current.Start = f
+			}
 		}
 	}
 	if current.Length > 0 || current.Start > 0 {
@@ -38,11 +49,14 @@ func ParseCueMinimal(lines []string) (toc.Layout, error) {
 	}
 	// Derive lengths
 	for i := 0; i < len(tracks); i++ {
-		var end int
+		end := leadoutFrames
 		if i+1 < len(tracks) {
 			end = tracks[i+1].Start
-		} else {
-			end = tracks[i].Start + 75*60 // placeholder 60s
+		} else if end == 0 {
+			end = tracks[i].Start + 75*60 // fallback to 60s if no leadout found
+		}
+		if end < tracks[i].Start {
+			end = tracks[i].Start
 		}
 		tracks[i].Length = end - tracks[i].Start
 	}
@@ -56,10 +70,29 @@ func ParseCueMinimal(lines []string) (toc.Layout, error) {
 
 // ParseCueFileMinimal reads a cuesheet file and parses it using ParseCueMinimal.
 func ParseCueFileMinimal(path string) (toc.Layout, error) {
-	data, err := ioutil.ReadFile(path)
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return toc.Layout{}, err
 	}
-	lines := strings.Split(string(data), "\n")
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	if err := sc.Err(); err != nil && err != io.EOF {
+		return toc.Layout{}, err
+	}
 	return ParseCueMinimal(lines)
+}
+
+func parseFrames(s string) (int, bool) {
+	m := timeRe.FindStringSubmatch(s)
+	if len(m) != 4 {
+		return 0, false
+	}
+	mm, _ := strconv.Atoi(m[1])
+	ss, _ := strconv.Atoi(m[2])
+	ff, _ := strconv.Atoi(m[3])
+	return mm*60*75 + ss*75 + ff, true
 }
