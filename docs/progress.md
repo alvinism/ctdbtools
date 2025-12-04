@@ -11,4 +11,4 @@
 - Introduced parity scaffolding (`internal/parity`): GF(2^16) arithmetic (poly 0x1100b), encode table builder, and basic syndrome generator to mirror CUETools parity path; tests added.
 - Ported CUETools parity Galois helpers and ParityToSyndrome conversion (syndrome <-> parity) into `internal/parity`, replacing earlier stubs.
 - Added rolling CRC offset calculators and tests, plus parity aggregation scaffolding (stride-based parity state and syndromes) in `internal/accuraterip`; full lead-in/out parity handling still pending.
-- Created detailed plan in `docs/plan.md` to track remaining algorithm and ingestion/CLI work.
+- Created detailed plan in `docs/plan.md` to track remaining algorithm and ingestion/CLI work. Started parity feed lead-in/out skipping; processor scaffolding combines rolling CRC and parity.

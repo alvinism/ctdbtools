@@ -7,6 +7,8 @@ type ParityAggregator struct {
 	stride     int
 	lastStride int
 	state      *ParityState
+	leadIn     int
+	leadOut    int
 }
 
 func NewParityAggregator(stride, lastStride, npar int) *ParityAggregator {
