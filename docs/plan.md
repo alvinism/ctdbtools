@@ -27,8 +27,8 @@ Goal: Go CLI that replicates CUETools verify/repair (CTDB + AccurateRip) on macO
 - Logging, progress output, docs.
 
 ## Detailed next steps (Algorithms)
-- [ ] Rolling CRC fill: feed per-track data into rolling tables from PCM; ensure Cache use matches CUETools.
-- [ ] Offset CRC getters: verify against synthetic cases (done for CRC/CRCWONULL basic) and expand coverage (lead-in/out, multi-track).
+- [ ] Rolling CRC fill: feed per-track data into rolling tables from PCM; ensure cache use matches CUETools.
+- [ ] Offset CRC getters: verify against synthetic cases (lead-in/out, multi-track) and expand coverage.
 - [ ] Parity integration: hook ParityAggregator into rolling feed with stride/laststride/lead-in/out, mirroring AccurateRipVerify.CalculateCRCs parity path.
 - [ ] Add tests: offset CRC/CRCWONULL across tracks; parity round-trips with lead-in/out; CTDB CRC edge cases.
 - [ ] Prepare ingestion scaffold: interface to stream PCM frames per track into rolling/parity accumulators.
