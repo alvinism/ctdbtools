@@ -1,52 +1,56 @@
 package accuraterip
 
 // ParityAggregator wraps ParityState with stride/laststride handling.
-// This is a simplified parity accumulator; it records parity for the main stride
-// and a trailing laststride region to mirror CUETools' leadin/leadout use.
+// This mirrors CueTools AccurateRipVerify parity accumulation.
+//
+// The parity window is now controlled inside ParityState via:
+//   - currentSample = sampleCount - pregap*588
+//   - currentStride = (currentSample * 2) / stride
+//   - doParity = currentStride >= 1 && currentStride <= stridecount
 type ParityAggregator struct {
 	stride     int
 	lastStride int
+	npar       int
 	state      *ParityState
 	tailState  *ParityState
 }
 
-func NewParityAggregator(stride, lastStride, npar int) *ParityAggregator {
+// NewParityAggregator creates a parity aggregator.
+// pregap is in frames (typically TOC.Pregap), finalSampleCount is AudioLength * 588.
+func NewParityAggregator(stride, lastStride, npar, pregap, finalSampleCount int) *ParityAggregator {
 	if lastStride == 0 {
 		lastStride = stride
 	}
 	var tail *ParityState
 	if lastStride != stride {
-		tail = NewParityState(lastStride, npar)
+		tail = NewParityState(lastStride, npar, pregap, finalSampleCount)
+		tail.LastStride = lastStride
 	}
+	state := NewParityState(stride, npar, pregap, finalSampleCount)
+	state.LastStride = lastStride
 	return &ParityAggregator{
 		stride:     stride,
 		lastStride: lastStride,
-		state:      NewParityState(stride, npar),
+		npar:       npar,
+		state:      state,
 		tailState:  tail,
 	}
 }
 
 func (p *ParityAggregator) LastStride() int { return p.lastStride }
 
-// FeedSamples consumes samples at a global sample offset (stereo samples) and updates parity.
-// leadInSamples and leadOutSamples can be used to skip parity outside data region.
-func (p *ParityAggregator) FeedSamples(globalSampleOffset int, samples []uint32, leadInSamples int, leadOutSamples int, totalSamples int) {
-	for i, s := range samples {
-		pos := globalSampleOffset + i
-		if pos < leadInSamples {
-			continue
-		}
-		if pos >= totalSamples-leadOutSamples {
-			continue
-		}
-		// use tail stride if within last stride window
-		if p.tailState != nil && pos >= totalSamples-p.lastStride {
-			part := (pos - (totalSamples - p.lastStride)) % p.lastStride
-			p.tailState.AddSamples([]uint32{s}, part, totalSamples)
-		} else {
-			part := pos % p.stride
-			p.state.AddSamples([]uint32{s}, part, totalSamples)
-		}
+// FeedSamples consumes samples and updates parity.
+// The parity window and lead-in/out handling is now done inside ParityState.AddSamples().
+func (p *ParityAggregator) FeedSamples(samples []uint32) {
+	// Feed to main state - it handles the parity window logic internally
+	p.state.AddSamples(samples)
+
+	// If we have a tail state for different lastStride, feed there too
+	// Note: In CueTools, the tail handling is more complex and involves
+	// separate syndrome calculation for the final laststride window.
+	// For now, we feed both states; the tail can be used for final stride verification.
+	if p.tailState != nil {
+		p.tailState.AddSamples(samples)
 	}
 }
 
@@ -61,4 +65,14 @@ func (p *ParityAggregator) TailSyndrome() [][]uint16 {
 		return nil
 	}
 	return p.tailState.Syndrome()
+}
+
+// SyndromeWithOffset returns syndrome adjusted for drive offset.
+func (p *ParityAggregator) SyndromeWithOffset(offset int, strides int) [][]uint16 {
+	return p.state.SyndromeWithOffset(offset, strides)
+}
+
+// State returns the underlying ParityState for advanced access.
+func (p *ParityAggregator) State() *ParityState {
+	return p.state
 }

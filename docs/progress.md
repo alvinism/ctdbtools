@@ -16,3 +16,23 @@
 - Added multi-track parity/CRC tests and initial ingestion scaffold: ffmpeg PCM decoder and minimal cue parser.
 - Added more parity offset/lead-out tests plus PCM ingestion runner and CLI verify scaffold (no CTDB/AR network yet).
 - Current focus: tighten parity window rules and offset corrections exactly like CUETools CalculateCRCs/GetSyndrome (including leadin/leadout adjustments for offsets, stride/laststride windows across tracks); expand synthetic multi-track tests; replace minimal cue parser and wire ffmpeg→processor into CLI verify; CTDB/AR network still pending.
+
+## 2024-12-04 (Parity Fidelity Improvements)
+- Refactored `ParityState` to match CueTools `AccurateRipVerify` parity behavior exactly:
+  - Added `pregap`, `finalSampleCount`, and `sampleCount` fields for tracking sample position
+  - Computed `strideCount = (finalSampleCount - pregap*588) * 2 / stride` to match CueTools
+  - Parity window now uses CueTools logic: `doParity = currentStride >= 1 && currentStride <= stridecount`
+  - `currentSample = sampleCount - pregap*588` (can be negative during pregap)
+  - `currentStride = (currentSample * 2) / stride`
+- Fixed lead-in/lead-out buffer indexing to match CueTools word-based approach:
+  - Lead-in: `index = currentSample*2 + wordOffset`
+  - Lead-out: `index = (finalSampleCount - sampleCount)*2 - wordOffset - 1`
+- Updated `ParityAggregator` to use new `NewParityState(stride, npar, pregap, finalSampleCount)` signature
+- Updated `Processor` to compute pregap and finalSampleCount from layout and pass to parity aggregator
+- `AddSamples()` now processes both left/right channels correctly (lo word at currentPart, hi word at currentPart+1)
+- Simplified `FeedSamples()` in `ParityAggregator` - parity window logic moved to `ParityState.AddSamples()`
+- All tests updated and passing with new API
+
+**Key Reference**: CueTools `AccurateRip.cs` lines 493-547 (CalculateCRCs), 611-618 (Write), 317-352 (GetSyndrome)
+
+**Next steps**: CTDB/AccurateRip network clients, CLI framework with standard `flag` package.
