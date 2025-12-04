@@ -32,6 +32,25 @@ func (t Track) End() int {
 	return t.Start + t.Length - 1
 }
 
+// AudioLengthFrames returns total audio length in frames across all audio tracks.
+func (l Layout) AudioLengthFrames() int {
+	if l.AudioTracks == 0 || l.FirstAudio < 1 || l.FirstAudio+l.AudioTracks-1 > len(l.Tracks) {
+		return 0
+	}
+	first := l.Tracks[l.FirstAudio-1].Start
+	last := l.Tracks[l.FirstAudio+l.AudioTracks-2].End()
+	return last + 1 - first
+}
+
+// TrackLengthFrames returns length in frames for a 1-based audio track number.
+func (l Layout) TrackLengthFrames(track int) int {
+	idx := track + l.FirstAudio - 2
+	if idx < 0 || idx >= len(l.Tracks) {
+		return 0
+	}
+	return l.Tracks[idx].Length
+}
+
 // TrackCount returns the number of tracks in the layout.
 func (l Layout) TrackCount() int {
 	return len(l.Tracks)

@@ -115,3 +115,94 @@ func (rt *RollingTables) FeedSamples(trackIndex int, samplesPerTrackPosition int
 	rt.CRCNL[trackIndex][2*rt.MaxOffset] = crcnl
 	rt.CRCV2[trackIndex][0] = crcv2
 }
+
+// CRCZeroOffset returns CRC32 for a track at zero offset using cached values.
+func (rt *RollingTables) CRCZeroOffset(track int, trackLengthSamples int) uint32 {
+	crc := rt.CRC32[track][2*rt.MaxOffset]
+	crc ^= 0xffffffff
+	return crc
+}
+
+// CRCWithOffset replicates CUETools AccurateRipVerify.CRC32(iTrack, oi) using rolling tables.
+// track 0 = whole disc.
+func (rt *RollingTables) CRCWithOffset(track int, oi int, toc *toc.Layout) uint32 {
+	if rt.CacheCRC32[track][rt.OffsetRangeAR+oi] != 0 {
+		return rt.CacheCRC32[track][rt.OffsetRangeAR+oi]
+	}
+	var crc uint32
+	if track == 0 {
+		dlen := toc.AudioLengthFrames()
+		if oi > 0 {
+			crc = rt.CRC32[toc.AudioTracks][2*rt.MaxOffset]
+			crc = hashes.Combine(rt.CRC32[0][oi], crc, (dlen-oi)*4)
+			crc = hashes.Combine(crc, 0, oi*4)
+		} else {
+			crc = rt.CRC32[toc.AudioTracks][2*rt.MaxOffset+oi]
+		}
+		crc ^= 0xffffffff // initial xor
+	} else {
+		trackLength := tocTrackLengthFrames(toc, track) * 588 * 4
+		if oi > 0 {
+			if track < toc.AudioTracks {
+				crc = rt.CRC32[track+1][oi]
+			} else {
+				crc = hashes.Combine(rt.CRC32[track][2*rt.MaxOffset], 0, oi*4)
+			}
+			crc = hashes.Combine(rt.CRC32[track][oi], crc, trackLength)
+		} else {
+			crc = hashes.Combine(rt.CRC32[track-1][2*rt.MaxOffset+oi], rt.CRC32[track][2*rt.MaxOffset+oi], trackLength)
+		}
+		crc ^= 0xffffffff
+	}
+	rt.CacheCRC32[track][rt.OffsetRangeAR+oi] = crc
+	return crc
+}
+
+// CRCWONULLWithOffset mirrors CUETools AccurateRipVerify.CRCWONULL(iTrack, oi) using rolling tables.
+func (rt *RollingTables) CRCWONULLWithOffset(track int, oi int, toc *toc.Layout) uint32 {
+	if rt.CacheCRCWN[track][rt.OffsetRangeAR+oi] != 0 {
+		return rt.CacheCRCWN[track][rt.OffsetRangeAR+oi]
+	}
+	var crc uint32
+	var cnt int
+	if track == 0 {
+		if oi > 0 {
+			cnt = rt.CRCNL[toc.AudioTracks][2*rt.MaxOffset] * 2
+			crc = rt.CRCWN[toc.AudioTracks][2*rt.MaxOffset]
+			cnt -= rt.CRCNL[0][oi] * 2
+			crc = hashes.Combine(rt.CRCWN[0][oi], crc, cnt)
+		} else {
+			cnt = rt.CRCNL[toc.AudioTracks][2*rt.MaxOffset+oi] * 2
+			crc = rt.CRCWN[toc.AudioTracks][2*rt.MaxOffset+oi]
+		}
+	} else {
+		if oi > 0 {
+			if track < toc.AudioTracks {
+				cnt = rt.CRCNL[track+1][oi] * 2
+				crc = rt.CRCWN[track+1][oi]
+			} else {
+				cnt = rt.CRCNL[track][2*rt.MaxOffset] * 2
+				crc = rt.CRCWN[track][2*rt.MaxOffset]
+			}
+			cnt -= rt.CRCNL[track][oi] * 2
+			crc = hashes.Combine(rt.CRCWN[track][oi], crc, cnt)
+		} else {
+			cnt = rt.CRCNL[track][2*rt.MaxOffset+oi] * 2
+			crc = rt.CRCWN[track][2*rt.MaxOffset+oi]
+			cnt -= rt.CRCNL[track-1][2*rt.MaxOffset+oi] * 2
+			crc = hashes.Combine(rt.CRCWN[track-1][2*rt.MaxOffset+oi], crc, cnt)
+		}
+	}
+	crc = hashes.Combine(0xffffffff, crc, cnt)
+	crc ^= 0xffffffff
+	rt.CacheCRCWN[track][rt.OffsetRangeAR+oi] = crc
+	return crc
+}
+
+// helper to get track length in frames
+func tocTrackLengthFrames(t *toc.Layout, track int) int {
+	if track == 0 {
+		return t.AudioLengthFrames()
+	}
+	return t.TrackLengthFrames(track)
+}
