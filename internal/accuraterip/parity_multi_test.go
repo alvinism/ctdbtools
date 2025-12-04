@@ -32,3 +32,15 @@ func TestParityLeadOutAndOffsets(t *testing.T) {
 		t.Fatalf("expected offset CRC to differ on track2")
 	}
 }
+
+func TestParityStrideMisalign(t *testing.T) {
+	agg := NewParityAggregator(4, 2, 4)
+	total := 6 // small window to exercise tail stride
+	agg.FeedSamples(0, []uint32{0x00010002, 0x00030004, 0x00050006, 0x00070008, 0x0009000A, 0x000B000C}, 0, 0, total)
+	if syndromeAllZero(agg.Syndrome()) {
+		t.Fatalf("expected main stride parity non-zero")
+	}
+	if tail := agg.TailSyndrome(); tail == nil || syndromeAllZero(tail) {
+		t.Fatalf("expected tail stride parity non-zero")
+	}
+}
