@@ -150,8 +150,8 @@ func (g *Galois) makeEncodeGxLog(npar int) []int {
 	return encodeGx
 }
 
-// makeEncodeTable matches CUETools Galois.makeEncodeTable: parityTable[byte, hi/lo, i].
-func (g *Galois) makeEncodeTable(npar int) [][][]uint16 {
+// MakeEncodeTable matches CUETools Galois.makeEncodeTable: parityTable[byte, hi/lo, i].
+func (g *Galois) MakeEncodeTable(npar int) [][][]uint16 {
 	loggx := g.makeEncodeGxLog(npar)
 	parity := make([][][]uint16, 256)
 	for i := 0; i < 256; i++ {
