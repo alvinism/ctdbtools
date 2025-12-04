@@ -9,3 +9,4 @@
 - Added neighbor-aware offset CRC calculators to mirror CUETools offset handling (TrackWindow with prefix/suffix) and tests for offset shifts.
 - Implemented CTDB CRC computation over track windows with offset/prefix/suffix trimming plus tests; still computing directly rather than via precomputed tables but matches expected window behavior.
 - Introduced parity scaffolding (`internal/parity`): GF(2^16) arithmetic (poly 0x1100b), encode table builder, and basic syndrome generator to mirror CUETools parity path; tests added.
+- Ported CUETools parity Galois helpers and ParityToSyndrome conversion (syndrome <-> parity) into `internal/parity`, replacing earlier stubs.
