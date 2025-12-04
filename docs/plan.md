@@ -1,31 +1,41 @@
-# Plan
+# Plan (Detailed)
 
-Phases to replicate CUETools verify/repair in Go:
+Goal: Go CLI that replicates CUETools verify/repair (CTDB + AccurateRip) on macOS.
 
-1) Repo scaffolding
-- Define module, directories, and docs for plan/progress.
-- Establish coding/testing conventions.
+## Phases
 
-2) Research + algorithm porting
-- Extract TOCID, AccurateRip IDs/CRCs, CTDB CRC/parity math from CUETools source.
-- Document findings and produce parity/CRC test vectors.
+1) Repo & Docs
+- Module setup, directory layout, high-level plan/progress tracking. **Done**
 
-3) Core library implementation
-- Implement TOC model + ID calculators.
-- Implement AccurateRip/CTDB CRC + parity generation/validation with tests mirroring CUETools.
-- Add CTDB/AR network client stubs (no calls until wired).
+2) Core Algorithms (CUETools parity/fidelity)
+- TOC models + IDs (TOCID, CDDB, AccurateRip IDs). **Done**
+- AccurateRip/CTDB CRC math: rolling CRC tables, offset handling, CRCWONULL, CTDB CRC. **In progress**
+- Parity/RS: port CUETools Galois16, ParityToSyndrome, encode tables, stride/lead-in/out handling. **In progress**
 
-4) Media ingestion
-- Parse cuesheets and scan audio files; normalize to PCM via ffmpeg (pipe).
-- Track-aware PCM iteration respecting offsets/pregap.
+3) Media ingestion
+- Cue parsing, file grouping, track layouts.
+- PCM decode via ffmpeg (pipe), feeding rolling/parity accumulators.
 
-5) CLI surface
-- `verify` command: read cue/audio, compute IDs/CRCs, query CTDB/AccurateRip, print report.
-- `repair` command: fetch parity, patch audio where possible, output corrected files.
-- Config for paths, offsets, temp dirs, ffmpeg binary.
+4) Network interactions
+- CTDB query/submit (HTTP), AccurateRip query; caching.
 
-6) Polish
-- Logging, progress reporting, cache, packaging.
-- Add docs and examples.
+5) CLI
+- Commands: `verify` (ctdb+AR), `repair` (ctdb parity), config flags (ffmpeg path, temp dir, offsets).
 
-State will be tracked in `docs/progress.md`.
+6) Tests & polish
+- Synthetic vectors for CRC/parity, offset cases; basic integration tests over small fixtures.
+- Logging, progress output, docs.
+
+## Detailed next steps (Algorithms)
+- [ ] Rolling CRC fill: feed per-track data into rolling tables from PCM; ensure Cache use matches CUETools.
+- [ ] Offset CRC getters: verify against synthetic cases (done for CRC/CRCWONULL basic) and expand coverage (lead-in/out, multi-track).
+- [ ] Parity integration: hook ParityAggregator into rolling feed with stride/laststride/lead-in/out, mirroring AccurateRipVerify.CalculateCRCs parity path.
+- [ ] Add tests: offset CRC/CRCWONULL across tracks; parity round-trips with lead-in/out; CTDB CRC edge cases.
+- [ ] Prepare ingestion scaffold: interface to stream PCM frames per track into rolling/parity accumulators.
+
+## Media ingestion/CLI steps (upcoming)
+- [ ] Cue parser + layout builder.
+- [ ] ffmpeg wrapper to emit 16-bit stereo PCM at 44.1kHz; slice per track respecting pregap/leadout.
+- [ ] Wire verify/repair commands to use accumulators and CTDB/AR clients.
+
+Progress is tracked in `docs/progress.md`; this plan will be updated as milestones complete.
