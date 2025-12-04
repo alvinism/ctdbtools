@@ -42,10 +42,10 @@ func (p *ParityAggregator) FeedSamples(globalSampleOffset int, samples []uint32,
 		// use tail stride if within last stride window
 		if p.tailState != nil && pos >= totalSamples-p.lastStride {
 			part := (pos - (totalSamples - p.lastStride)) % p.lastStride
-			p.tailState.AddSamples([]uint32{s}, part)
+			p.tailState.AddSamples([]uint32{s}, part, totalSamples)
 		} else {
 			part := pos % p.stride
-			p.state.AddSamples([]uint32{s}, part)
+			p.state.AddSamples([]uint32{s}, part, totalSamples)
 		}
 	}
 }
