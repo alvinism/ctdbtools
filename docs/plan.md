@@ -26,12 +26,11 @@ Goal: Go CLI that replicates CUETools verify/repair (CTDB + AccurateRip) on macO
 - Synthetic vectors for CRC/parity, offset cases; basic integration tests over small fixtures.
 - Logging, progress output, docs.
 
-## Detailed next steps (Algorithms)
-- [ ] Rolling CRC fill: feed per-track data into rolling tables from PCM; ensure cache use matches CUETools.
-- [ ] Offset CRC getters: verify against synthetic cases (lead-in/out, multi-track) and expand coverage.
-- [ ] Parity integration: hook ParityAggregator into rolling feed with stride/laststride/lead-in/out, mirroring AccurateRipVerify.CalculateCRCs parity path.
-- [ ] Add tests: offset CRC/CRCWONULL across tracks; parity round-trips with lead-in/out; CTDB CRC edge cases.
-- [ ] Prepare ingestion scaffold: interface to stream PCM frames per track into rolling/parity accumulators.
+## Detailed next steps (Algorithms & Ingestion)
+- Parity window rules: enforce lead-in = pregap*588, lead-out = lastStride; parity covers only data window, tail parity uses final lastStride window; add stride-misalignment test (length not multiple of stride).
+- Offset-aware syndromes: ensure SyndromeWithOffset applies leadin/leadout corrections per offset; test multi-track with pregap and offset differences.
+- Rolling CRC/parity coherence: multi-track synthetic test asserting CRC/CRCWONULL differ per offset and parity stays zero in skipped regions; add CTDB CRC once implemented.
+- Ingestion wiring: replace minimal cue parser with robust parser; wire ffmpeg->processor (per-track feed) in ingest; expose processor results via CLI verify scaffold (CTDB/AR network hooks TODO).
 
 ## Media ingestion/CLI steps (upcoming)
 - [ ] Cue parser + layout builder.
