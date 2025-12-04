@@ -22,13 +22,34 @@ func TestProcessorCRCFlow(t *testing.T) {
 	}
 }
 
+func TestProcessorLeadInSkipParity(t *testing.T) {
+	layout := tocLayoutSingle()
+	p := NewProcessor(layout, 4, 4, 4, true)
+	// auto derive lead-in from Pregap (1 frame -> 588 samples)
+	p.StartTrack(1, -1, -1)
+	p.Feed([]uint32{0x00000000, 0x00010002}) // first sample within lead-in should be skipped
+	syn := p.Syndrome()
+	found := false
+	for _, row := range syn {
+		for _, v := range row {
+			if v != 0 {
+				found = true
+				break
+			}
+		}
+	}
+	if found {
+		t.Fatalf("expected parity to skip lead-in and remain zero")
+	}
+}
+
 func tocLayoutSingle() toc.Layout {
 	return toc.Layout{
 		FirstAudio:  1,
 		AudioTracks: 1,
 		Leadout:     3,
 		Tracks: []toc.Track{
-			{Start: 0, Length: 3, IsAudio: true},
+			{Start: 0, Length: 3, IsAudio: true, Pregap: 1},
 		},
 	}
 }

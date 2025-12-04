@@ -25,9 +25,16 @@ func NewProcessor(layout toc.Layout, stride, laststride, npar int, calcParity bo
 }
 
 // StartTrack initializes counters for a new track; leadIn/leadOut are sample counts to skip for parity.
+// Pass leadIn/leadOut < 0 to auto-derive (currently defaults to 0 leadIn/out).
 func (p *Processor) StartTrack(trackIndex int, leadIn, leadOut int) {
 	p.currentTrack = trackIndex
 	p.trackSamples = 0
+	if leadIn < 0 {
+		leadIn = tocLeadInSamples(&p.layout, trackIndex)
+	}
+	if leadOut < 0 {
+		leadOut = 0
+	}
 	p.leadIn = leadIn
 	p.leadOut = leadOut
 	p.totalSamples = tocTrackLengthFrames(&p.layout, trackIndex) * 588

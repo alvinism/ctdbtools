@@ -206,3 +206,14 @@ func tocTrackLengthFrames(t *toc.Layout, track int) int {
 	}
 	return t.TrackLengthFrames(track)
 }
+
+func tocLeadInSamples(t *toc.Layout, track int) int {
+	if track == 0 {
+		return 0
+	}
+	idx := track + t.FirstAudio - 2
+	if idx >= 0 && idx < len(t.Tracks) {
+		return t.Tracks[idx].Pregap * 588
+	}
+	return 0
+}
