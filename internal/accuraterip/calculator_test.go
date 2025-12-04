@@ -68,3 +68,21 @@ func TestOffsetCRCs(t *testing.T) {
 		t.Fatalf("expected CRCWONULL with backward shift to differ (dropped non-zero)")
 	}
 }
+
+func TestTrackWindowCRCs(t *testing.T) {
+	prefix := []uint32{0x00070008}            // P
+	track := []uint32{0x00010002, 0x00030004} // A,B
+	suffix := []uint32{0x00050006}            // C
+	tw := TrackWindow{Prefix: prefix, Track: track, Suffix: suffix}
+
+	ar0, _, crc0, _, _, _ := ComputeCRCs(tw, 0)
+	arBack, _, crcBack, _, _, _ := ComputeCRCs(tw, -1) // leading P, drop last
+	arFwd, _, crcFwd, _, _, _ := ComputeCRCs(tw, 1)    // drop first, include C
+
+	if ar0 == arBack || crc0 == crcBack {
+		t.Fatalf("expected backward offset to change CRCs")
+	}
+	if ar0 == arFwd || crc0 == crcFwd {
+		t.Fatalf("expected forward offset to change CRCs")
+	}
+}
