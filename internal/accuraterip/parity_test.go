@@ -29,7 +29,8 @@ func TestParitySyndromeRoundTrip(t *testing.T) {
 
 func TestParityAggregator(t *testing.T) {
 	agg := NewParityAggregator(4, 4, 4)
-	agg.FeedSamples(0, []uint32{0x00010002, 0x00030004, 0x00050006})
+	total := 3
+	agg.FeedSamples(0, []uint32{0x00010002, 0x00030004, 0x00050006}, 0, 0, total)
 	syn := agg.Syndrome()
 	if len(syn) != 4 || len(syn[0]) != 4 {
 		t.Fatalf("unexpected syndrome shape")

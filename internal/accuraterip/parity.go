@@ -33,11 +33,10 @@ func (ps *ParityState) AddSamples(samples []uint32, offsetSamples int) {
 		part := (offsetSamples + i) % ps.Stride
 		lo := byte(s & 0xff)
 		hi := byte((s >> 8) & 0xff)
-		tab := ps.EncodeTab[lo]
 		for j := 0; j < ps.MaxNpar; j++ {
 			idx := part*ps.MaxNpar*2 + j*2
 			cur := uint16(ps.ParityBuf[idx]) | uint16(ps.ParityBuf[idx+1])<<8
-			cur ^= tab[0][j]
+			cur ^= ps.EncodeTab[lo][0][j]
 			cur ^= ps.EncodeTab[hi][1][j]
 			ps.ParityBuf[idx] = byte(cur)
 			ps.ParityBuf[idx+1] = byte(cur >> 8)
