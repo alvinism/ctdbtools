@@ -1,0 +1,25 @@
+# build artifacts
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.a
+*.out
+*.log
+
+# editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# module caches
+vendor/
+
+# local refs
+refs/
