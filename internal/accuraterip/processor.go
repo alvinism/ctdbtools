@@ -61,3 +61,8 @@ func (p *Processor) CRCWONULL(offset int) uint32 {
 func (p *Processor) Syndrome() [][]uint16 {
 	return p.parity.Syndrome()
 }
+
+// TailSyndrome returns tail syndrome when lastStride differs.
+func (p *Processor) TailSyndrome() [][]uint16 {
+	return p.parity.TailSyndrome()
+}

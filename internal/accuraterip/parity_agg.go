@@ -7,18 +7,22 @@ type ParityAggregator struct {
 	stride     int
 	lastStride int
 	state      *ParityState
-	leadIn     int
-	leadOut    int
+	tailState  *ParityState
 }
 
 func NewParityAggregator(stride, lastStride, npar int) *ParityAggregator {
 	if lastStride == 0 {
 		lastStride = stride
 	}
+	var tail *ParityState
+	if lastStride != stride {
+		tail = NewParityState(lastStride, npar)
+	}
 	return &ParityAggregator{
 		stride:     stride,
 		lastStride: lastStride,
 		state:      NewParityState(stride, npar),
+		tailState:  tail,
 	}
 }
 
@@ -33,12 +37,26 @@ func (p *ParityAggregator) FeedSamples(globalSampleOffset int, samples []uint32,
 		if pos >= totalSamples-leadOutSamples {
 			continue
 		}
-		part := pos % p.stride
-		p.state.AddSamples([]uint32{s}, part)
+		// use tail stride if within last stride window
+		if p.tailState != nil && pos >= totalSamples-p.lastStride {
+			part := (pos - (totalSamples - p.lastStride)) % p.lastStride
+			p.tailState.AddSamples([]uint32{s}, part)
+		} else {
+			part := pos % p.stride
+			p.state.AddSamples([]uint32{s}, part)
+		}
 	}
 }
 
 // Syndrome returns current syndrome matrix.
 func (p *ParityAggregator) Syndrome() [][]uint16 {
 	return p.state.Syndrome()
+}
+
+// TailSyndrome returns the tail syndrome if lastStride differs; nil otherwise.
+func (p *ParityAggregator) TailSyndrome() [][]uint16 {
+	if p.tailState == nil {
+		return nil
+	}
+	return p.tailState.Syndrome()
 }
