@@ -66,3 +66,8 @@ func (p *Processor) Syndrome() [][]uint16 {
 func (p *Processor) TailSyndrome() [][]uint16 {
 	return p.parity.TailSyndrome()
 }
+
+// ParityLastStride exposes the last stride length for lead-out defaults.
+func (p *Processor) ParityLastStride() int {
+	return p.parity.LastStride()
+}

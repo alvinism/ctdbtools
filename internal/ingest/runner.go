@@ -50,6 +50,5 @@ func procTailStride(p *accuraterip.Processor) int {
 	if p == nil {
 		return 0
 	}
-	// last stride already returned by parity aggregator LastStride when defaulting leadOut in StartTrack
-	return 0
+	return p.ParityLastStride()
 }

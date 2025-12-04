@@ -33,7 +33,7 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 			return err
 		}
 	}
-	proc, err := ingest.ProcessFile(ctx, opts.AudioPath, opts.Layout, opts.Stride, opts.LastStride, opts.Npar, opts.CalcParity)
+	proc, err := ingest.ProcessFile(ctx, opts.AudioPath, layout, opts.Stride, opts.LastStride, opts.Npar, opts.CalcParity)
 	if err != nil {
 		return err
 	}
