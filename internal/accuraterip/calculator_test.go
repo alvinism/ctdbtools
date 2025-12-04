@@ -37,3 +37,34 @@ func TestProcessTrackSimple(t *testing.T) {
 func dummyLayout() toc.Layout {
 	return toc.Layout{}
 }
+
+func TestOffsetCRCs(t *testing.T) {
+	// three samples: A,B,C
+	samples := []uint32{
+		0x00010002, // A
+		0x00030004, // B
+		0x00050006, // C
+	}
+	zero := CRC32WithOffset(samples, 0)
+	shiftFwd := CRC32WithOffset(samples, 1)   // drop A, pad zero
+	shiftBack := CRC32WithOffset(samples, -1) // pad zero, drop C
+
+	if zero == shiftFwd {
+		t.Fatalf("expected different CRC when shifting forward")
+	}
+	if zero == shiftBack {
+		t.Fatalf("expected different CRC when shifting backward")
+	}
+
+	woZero := CRCWONULLWithOffset(samples, 0)
+	if woZero != CRCWONULLWithOffset(samples, 0) {
+		t.Fatalf("CRCWONULL should be deterministic")
+	}
+	// verify padding zeros do not change CRCWONULL but dropping changes
+	if woZero == CRCWONULLWithOffset(samples, 1) {
+		t.Fatalf("expected CRCWONULL with forward shift to differ (dropped non-zero)")
+	}
+	if woZero == CRCWONULLWithOffset(samples, -1) {
+		t.Fatalf("expected CRCWONULL with backward shift to differ (dropped non-zero)")
+	}
+}
