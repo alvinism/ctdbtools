@@ -31,6 +31,11 @@ func (tw TrackWindow) sampleAt(idx, offset int) uint32 {
 	return 0
 }
 
+// SampleAt is an exported helper for other packages needing neighbor-aware sample access.
+func SampleAt(tw TrackWindow, idx, offset int) uint32 {
+	return tw.sampleAt(idx, offset)
+}
+
 // ComputeCRCs returns AccurateRip CRC (v1+v2), CRC32, CRCWONULL, non-null sample count, and peak for a window at the given offset.
 func ComputeCRCs(tw TrackWindow, offset int) (ar, arv2, crc32, crcwn uint32, nonNull int, peak int) {
 	crc32 = 0xffffffff
