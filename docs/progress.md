@@ -35,4 +35,26 @@
 
 **Key Reference**: CueTools `AccurateRip.cs` lines 493-547 (CalculateCRCs), 611-618 (Write), 317-352 (GetSyndrome)
 
-**Next steps**: CTDB/AccurateRip network clients, CLI framework with standard `flag` package.
+## 2024-12-04 (Network Clients)
+- Created `internal/network/` package with CTDB and AccurateRip HTTP clients
+- Implemented AccurateRip client (`accuraterip.go`):
+  - URL construction matching CueTools format: `http://www.accuraterip.com/accuraterip/{d1&0xF}/{d1>>4&0xF}/{d1>>8&0xF}/dBAR-{tracks:03d}-{d1}-{d2}-{cddb}.bin`
+  - Binary response parsing: 13-byte disk header + 9-byte track entries (LE uint32)
+  - Rate limiting: 500ms minimum between requests per AccurateRip guidelines
+- Implemented CTDB client (`ctdb.go`):
+  - Lookup URL: `http://db.cuetools.net/lookup2.php?version=3&ctdb={0|1}&fuzzy={0|1}&metadata={level}&toc={toc}`
+  - XML response parsing with entry and metadata extraction
+  - Syndrome/parity handling via existing `internal/parity` package
+  - Range request support for incremental parity fetching
+- Added base HTTP client (`client.go`) with configurable timeouts and user-agent
+- Added shared types (`types.go`): ARTrack, ARDisk, ARResponse, CTDBEntry, CTDBResponse, etc.
+- Added `TOCString()` method to `internal/toc/toc.go` for CTDB queries
+- Integrated network clients into CLI verify command (`internal/cli/commands.go`):
+  - New options: `QueryAR`, `QueryCTDB`, `Verbose`
+  - Displays AccurateRip ID, queries database, compares CRCs
+  - Displays CTDB entries with confidence scores
+- Full test coverage for binary/XML parsing and HTTP client integration
+
+**Key Reference**: CueTools `AccurateRip.cs` lines 829-903 (URL/response), `CUEToolsDB.cs` lines 77-83 (lookup URL)
+
+**Next steps**: CLI framework with `flag` package, error correction/repair workflow, multi-track CRC comparison.

@@ -102,6 +102,21 @@ func (l Layout) CDDBID() (string, error) {
 	return fmt.Sprintf("%08X", id), nil
 }
 
+// TOCString returns the TOC string for CTDB queries.
+// Format: "{-}{start}:{-}{start}:...:{leadout}" where "-" prefix indicates non-audio.
+// Mirrors CUETools.CDImage/CDImage.cs ToString().
+func (l Layout) TOCString() string {
+	var b strings.Builder
+	for _, tr := range l.Tracks {
+		if !tr.IsAudio {
+			b.WriteString("-")
+		}
+		b.WriteString(fmt.Sprintf("%d:", tr.Start))
+	}
+	b.WriteString(fmt.Sprintf("%d", l.Leadout))
+	return b.String()
+}
+
 // AccurateRipID builds the AccurateRip disc id triplet.
 // Format: discId1-discId2-cddbId (lowercase) matching CUETools.
 func (l Layout) AccurateRipID() (string, error) {
