@@ -78,6 +78,7 @@ func (ps *ParityState) SyndromeWithOffset(offset int, strides int) [][]uint16 {
 	}
 	syn := parity.Parity2Syndrome(strides, ps.Stride, ps.MaxNpar, ps.MaxNpar, ps.ParityBuf, 0, -offset*2)
 	g := parity.Galois16
+	// mirror CUETools AccurateRipVerify.GetSyndrome leadin/leadout adjustments
 	for part2 := 0; part2 < strides; part2++ {
 		part := (part2 + offset*2 + ps.Stride) % ps.Stride
 		if part < offset*2 {

@@ -52,7 +52,7 @@ func TestOffsetSyndromeWithPregap(t *testing.T) {
 	p.StartTrack(1, 0, 0)
 	p.Feed([]uint32{0x00010002, 0x00030004, 0x00050006})
 	s0 := p.Syndrome()
-	sOff := p.parity.state.SyndromeWithOffset(1, 4)
+	sOff := p.OffsetSyndrome(1, 4)
 	if sOff == nil {
 		t.Fatalf("expected offset syndrome")
 	}

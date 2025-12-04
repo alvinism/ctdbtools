@@ -28,7 +28,7 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 			return fmt.Errorf("layout or cue path required")
 		}
 		var err error
-		layout, err = ingest.ParseCueFileMinimal(opts.CuePath)
+		layout, err = ingest.ParseCueFile(opts.CuePath)
 		if err != nil {
 			return err
 		}

@@ -71,3 +71,8 @@ func (p *Processor) TailSyndrome() [][]uint16 {
 func (p *Processor) ParityLastStride() int {
 	return p.parity.LastStride()
 }
+
+// OffsetSyndrome returns parity syndrome adjusted for offset.
+func (p *Processor) OffsetSyndrome(offset int, strides int) [][]uint16 {
+	return p.parity.state.SyndromeWithOffset(offset, strides)
+}

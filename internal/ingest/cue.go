@@ -15,8 +15,8 @@ import (
 
 var timeRe = regexp.MustCompile(`(\d+):(\d+):(\d+)`)
 
-// ParseCueMinimal parses TRACK/PREGAP/INDEX 01 start times into a toc.Layout.
-func ParseCueMinimal(lines []string) (toc.Layout, error) {
+// ParseCue parses TRACK/PREGAP/INDEX 01 start times into a toc.Layout.
+func ParseCue(lines []string) (toc.Layout, error) {
 	var tracks []toc.Track
 	var current toc.Track
 	var leadoutFrames int
@@ -69,7 +69,7 @@ func ParseCueMinimal(lines []string) (toc.Layout, error) {
 }
 
 // ParseCueFileMinimal reads a cuesheet file and parses it using ParseCueMinimal.
-func ParseCueFileMinimal(path string) (toc.Layout, error) {
+func ParseCueFile(path string) (toc.Layout, error) {
 	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return toc.Layout{}, err
@@ -83,7 +83,7 @@ func ParseCueFileMinimal(path string) (toc.Layout, error) {
 	if err := sc.Err(); err != nil && err != io.EOF {
 		return toc.Layout{}, err
 	}
-	return ParseCueMinimal(lines)
+	return ParseCue(lines)
 }
 
 func parseFrames(s string) (int, bool) {
