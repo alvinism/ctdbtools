@@ -222,6 +222,11 @@ func tocLeadOutSamples(t *toc.Layout, track int, defaultTail int) int {
 	if track == 0 {
 		return defaultTail
 	}
-	// Use default tail unless specific leadout handling is needed per track
+	// clamp to track length in samples
+	frames := t.TrackLengthFrames(track)
+	samples := frames * 588
+	if defaultTail > samples {
+		return samples
+	}
 	return defaultTail
 }

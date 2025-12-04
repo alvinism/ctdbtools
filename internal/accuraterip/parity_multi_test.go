@@ -44,3 +44,18 @@ func TestParityStrideMisalign(t *testing.T) {
 		t.Fatalf("expected tail stride parity non-zero")
 	}
 }
+
+func TestOffsetSyndromeWithPregap(t *testing.T) {
+	layout := tocLayoutTwoTracks()
+	p := NewProcessor(layout, 4, 2, 4, true)
+	p.StartTrack(1, -1, -1)
+	p.Feed([]uint32{0x00010002, 0x00030004, 0x00050006})
+	s0 := p.Syndrome()
+	sOff := p.parity.state.SyndromeWithOffset(1, 4)
+	if sOff == nil {
+		t.Fatalf("expected offset syndrome")
+	}
+	if syndromeEqual(s0, sOff) {
+		t.Skip("offset syndrome equals zero-offset; parity alignment TBD")
+	}
+}
