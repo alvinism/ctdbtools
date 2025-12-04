@@ -217,3 +217,11 @@ func tocLeadInSamples(t *toc.Layout, track int) int {
 	}
 	return 0
 }
+
+func tocLeadOutSamples(t *toc.Layout, track int, defaultTail int) int {
+	if track == 0 {
+		return defaultTail
+	}
+	// Use default tail unless specific leadout handling is needed per track
+	return defaultTail
+}

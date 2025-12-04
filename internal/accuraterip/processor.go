@@ -33,7 +33,7 @@ func (p *Processor) StartTrack(trackIndex int, leadIn, leadOut int) {
 		leadIn = tocLeadInSamples(&p.layout, trackIndex)
 	}
 	if leadOut < 0 {
-		leadOut = p.parity.LastStride()
+		leadOut = tocLeadOutSamples(&p.layout, trackIndex, p.parity.LastStride())
 	}
 	p.leadIn = leadIn
 	p.leadOut = leadOut
