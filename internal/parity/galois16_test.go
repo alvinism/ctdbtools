@@ -15,7 +15,7 @@ func TestMulDiv(t *testing.T) {
 }
 
 func TestEncodeTable(t *testing.T) {
-	tab := Galois16.makeEncodeTable(4)
+	tab := Galois16.MakeEncodeTable(4)
 	if len(tab) != 256 {
 		t.Fatalf("unexpected outer len %d", len(tab))
 	}
