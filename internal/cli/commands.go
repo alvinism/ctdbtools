@@ -12,6 +12,7 @@ import (
 type VerifyOptions struct {
 	AudioPath  string
 	Layout     toc.Layout
+	CuePath    string
 	Stride     int
 	LastStride int
 	Npar       int
@@ -21,6 +22,17 @@ type VerifyOptions struct {
 // Verify runs a verification pass (decode PCM, compute CRCs/parity).
 // CTDB/AccurateRip network lookups are TODO.
 func Verify(ctx context.Context, opts VerifyOptions) error {
+	layout := opts.Layout
+	if layout.AudioTracks == 0 {
+		if opts.CuePath == "" {
+			return fmt.Errorf("layout or cue path required")
+		}
+		var err error
+		layout, err = ingest.ParseCueFileMinimal(opts.CuePath)
+		if err != nil {
+			return err
+		}
+	}
 	proc, err := ingest.ProcessFile(ctx, opts.AudioPath, opts.Layout, opts.Stride, opts.LastStride, opts.Npar, opts.CalcParity)
 	if err != nil {
 		return err

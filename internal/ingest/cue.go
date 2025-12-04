@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"fmt"
+	"io/ioutil"
 	"strings"
 
 	"ctdbtool/internal/toc"
@@ -51,4 +52,14 @@ func ParseCueMinimal(lines []string) (toc.Layout, error) {
 		Leadout:     tracks[len(tracks)-1].End(),
 		Tracks:      tracks,
 	}, nil
+}
+
+// ParseCueFileMinimal reads a cuesheet file and parses it using ParseCueMinimal.
+func ParseCueFileMinimal(path string) (toc.Layout, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return toc.Layout{}, err
+	}
+	lines := strings.Split(string(data), "\n")
+	return ParseCueMinimal(lines)
 }
