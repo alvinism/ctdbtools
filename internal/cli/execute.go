@@ -74,9 +74,9 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("CUE file not found: %s", cuePath)
 	}
 
-	// Use lastStride = stride if not explicitly set
+	// Use -1 as sentinel for "auto-compute" if not explicitly set
 	if !cmd.Flags().Changed("last-stride") {
-		lastStride = stride
+		lastStride = -1
 	}
 
 	// Setup context with cancellation
