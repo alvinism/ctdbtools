@@ -1,15 +1,33 @@
+// Package parity implements Reed-Solomon error detection for CTDB verification.
+//
+// This package provides the core algorithms for detecting and locating errors
+// in CD rips by comparing local syndrome data with CTDB (CUETools Database)
+// syndrome data. The key algorithms are:
+//
+//   - Berlekamp-Massey: Finds the error locator polynomial from syndrome data
+//   - Chien Search: Finds the roots of the error locator polynomial (error positions)
+//
+// Together, these enable the "differs in X samples @MM:SS:FF" feature that
+// reports exactly where errors are located in a CD rip.
+//
+// See docs/CTDB_ALGORITHM.md for detailed algorithm explanation.
 package parity
 
 import "fmt"
 
 // RsDecode implements Reed-Solomon error detection and localization.
 // Ported from CUETools.Parity.RsDecode for use with CTDB syndrome data.
+//
+// The decoder works in GF(2^16) (Galois Field with 65536 elements) and can
+// detect up to npar/2 errors per stride row. With typical npar=8, this means
+// up to 4 errors can be detected and located per stride row.
 type RsDecode struct {
 	galois *Galois
 	npar   int
 }
 
 // NewRsDecode creates a new Reed-Solomon decoder for the given number of parity symbols.
+// npar is typically 8 for CTDB, allowing detection of up to 4 errors per stride row.
 func NewRsDecode(npar int) *RsDecode {
 	return &RsDecode{
 		galois: Galois16,
@@ -18,116 +36,294 @@ func NewRsDecode(npar int) *RsDecode {
 }
 
 // CalcSigmaMBM calculates the error locator polynomial using the modified Berlekamp-Massey algorithm.
-// syndrome is the XOR of local and CTDB syndromes (error syndrome).
-// Returns the number of errors detected, or -1 if too many errors.
-// sigma will contain the error locator polynomial coefficients.
+//
+// The error locator polynomial σ(x) has roots at the error positions:
+//
+//	σ(x) = (1 - α^e1 * x)(1 - α^e2 * x)...(1 - α^en * x)
+//
+// where e1, e2, ..., en are the error positions.
+//
+// Input:
+//   - syndrome: XOR of local and CTDB syndromes (the "error syndrome")
+//   - sigma: output array for polynomial coefficients
+//
+// Output:
+//   - Returns number of errors (degree of σ), or -1 if uncorrectable
+//   - sigma[0..numErrors] contains the polynomial coefficients
+//
+// This implementation matches CueTools RsDecode.cs calcSigmaMBM exactly.
+// Key difference from standard BM: sg0 is shifted AFTER the polynomial update.
 func (r *RsDecode) CalcSigmaMBM(syndrome []int, sigma []int) int {
-	// Initialize sigma to [1, 0, 0, ...]
-	for i := range sigma {
-		sigma[i] = 0
-	}
-	sigma[0] = 1
+	// CueTools uses sg0, sg1, wk arrays and jisu0, jisu1, m counters
+	sg0 := make([]int, r.npar+1)
+	sg1 := make([]int, r.npar+1)
+	wk := make([]int, r.npar+1)
 
-	// B(x) = 1, L = 0
-	B := make([]int, r.npar+1)
-	B[0] = 1
-	L := 0
+	// CueTools initialization: sg0[1] = 1, sg1[0] = 1
+	sg0[1] = 1
+	sg1[0] = 1
+	jisu0 := 1
+	jisu1 := 0
+	m := -1
 
 	for n := 0; n < r.npar; n++ {
-		// Calculate discrepancy delta
-		delta := syndrome[n]
-		for i := 1; i <= L; i++ {
-			if sigma[i] != 0 && syndrome[n-i] != 0 {
-				delta ^= r.galois.mul(sigma[i], syndrome[n-i])
+		// Calculate discrepancy d
+		d := syndrome[n]
+		for i := 1; i <= jisu1; i++ {
+			d ^= r.galois.mul(sg1[i], syndrome[n-i])
+		}
+
+		if d != 0 {
+			logd := r.galois.toLog(d)
+			// wk[i] = sg1[i] ^ mulExp(sg0[i], logd)
+			for i := 0; i <= n; i++ {
+				wk[i] = sg1[i] ^ r.galois.mulExp(sg0[i], logd)
+			}
+			js := n - m
+			if js > jisu1 {
+				// sg0[i] = divExp(sg1[i], logd)
+				for i := 0; i <= jisu0; i++ {
+					sg0[i] = r.galois.divExp(sg1[i], logd)
+				}
+				m = n - jisu1
+				jisu1 = js
+				jisu0 = js
+			}
+			// sg1[i] = wk[i]
+			for i := 0; i < r.npar; i++ {
+				sg1[i] = wk[i]
 			}
 		}
 
-		// Shift B(x)
-		for i := r.npar; i > 0; i-- {
-			B[i] = B[i-1]
+		// Shift sg0 - this happens AFTER the update, which is the key difference from standard BM
+		for i := jisu0; i > 0; i-- {
+			sg0[i] = sg0[i-1]
 		}
-		B[0] = 0
-
-		if delta != 0 {
-			if 2*L <= n {
-				// Update L and swap
-				temp := make([]int, r.npar+1)
-				copy(temp, sigma)
-				invDelta := r.galois.div(1, delta)
-				for i := 0; i <= r.npar; i++ {
-					sigma[i] ^= r.galois.mul(delta, B[i])
-				}
-				for i := 0; i <= r.npar; i++ {
-					B[i] = r.galois.mul(invDelta, temp[i])
-				}
-				L = n + 1 - L
-			} else {
-				// Just update sigma
-				for i := 0; i <= r.npar; i++ {
-					sigma[i] ^= r.galois.mul(delta, B[i])
-				}
-			}
-		}
+		sg0[0] = 0
+		jisu0++
 	}
 
-	// Check if error count is within correctable range
-	if L > r.npar/2 {
-		return -1 // Too many errors
+	// CueTools: if sg1[jisu1] == 0, return -1
+	if sg1[jisu1] == 0 {
+		return -1
 	}
 
-	return L
+	// Copy result to sigma
+	maxCopy := r.npar/2 + 2
+	if maxCopy > r.npar {
+		maxCopy = r.npar
+	}
+	for i := 0; i < maxCopy; i++ {
+		sigma[i] = sg1[i]
+	}
+
+	return jisu1
 }
 
 // ChienSearch finds error positions using Chien search algorithm.
-// sigma is the error locator polynomial from CalcSigmaMBM.
-// n is the codeword length (stridecount, NOT including npar).
-// numErrors is the expected number of errors from CalcSigmaMBM.
-// Returns the error positions (as GF elements), or nil if not all roots were found.
+//
+// The Chien search evaluates σ(x) at all possible positions α^(-i) for i = 0 to n-1.
+// When σ(α^(-i)) = 0, position i contains an error.
+//
+// Input:
+//   - sigma: error locator polynomial from CalcSigmaMBM
+//   - n: codeword length (stridecount, NOT including npar)
+//   - numErrors: expected number of errors (from CalcSigmaMBM)
+//
+// Output:
+//   - Error positions as GF elements, or nil if not all roots were found
+//
+// The search fails (returns nil) if:
+//   - We can't find numErrors roots within the valid range [0, n)
+//   - This usually means the offset is wrong, causing syndrome mismatch
+//
+// This implementation matches CueTools RsDecode.cs chienSearch, including the fast path
+// for GF(2^16) when no sigma coefficients are zero. The fast path uses log-domain
+// arithmetic and batches iterations for performance.
 func (r *RsDecode) ChienSearch(sigma []int, n, numErrors int) []int {
 	if numErrors == 0 {
 		return []int{}
 	}
 
-	// For single error, use direct calculation
-	if numErrors == 1 && sigma[1] != 0 {
-		pos := r.galois.toLog(sigma[1])
-		if pos >= n {
-			return nil
+	// CueTools optimization: For single error (jisu == 1), sigma[1] is the error position
+	// sigma(z) = 1 + sigma[1] * z, zero at z = 1/sigma[1] = alpha^(-log(sigma[1]))
+	// which means error at position log(sigma[1])
+	last := sigma[1]
+	if numErrors == 1 {
+		if r.galois.toLog(last) >= n {
+			return nil // Error position out of range
 		}
-		return []int{r.galois.toExp(pos)}
+		return []int{last}
 	}
 
-	// General Chien search
-	// Evaluate sigma at each power of alpha
-	sg := make([]int, numErrors+1)
-	for i := 0; i <= numErrors; i++ {
-		sg[i] = sigma[i]
+	// Check if any sigma coefficient is zero
+	haveZeroes := false
+	for j := 1; j <= numErrors; j++ {
+		if sigma[j] == 0 {
+			haveZeroes = true
+			break
+		}
 	}
 
-	positions := make([]int, 0, numErrors)
-	for i := 0; i < n; i++ {
-		// Evaluate polynomial at alpha^i
-		sum := 1
+	positions := make([]int, numErrors)
+	posIdx := numErrors - 1 // Fill positions from end (CueTools style)
+
+	// Fast path for GF(2^16) when no zeros - uses log domain iteration
+	// This matches CueTools RsDecode.cs lines 164-198
+	if !haveZeroes && r.galois.max == 0xffff {
+		const himax = 0x11000
+		sg := make([]int, numErrors+1)
+		exp := r.galois.expTbl
+		log := r.galois.logTbl
+
+		// Convert to log domain, adjusted for position n
+		// sg[j] = log[sg[j]] - ((j * n) % 0xffff) + 0xffff
 		for j := 1; j <= numErrors; j++ {
-			sum ^= sg[j]
+			sg[j] = int(log[sigma[j]]) - ((j * n) % 0xffff) + 0xffff
+			sg[j] = (sg[j] & 0xffff) + (sg[j] >> 16)
 		}
 
-		// Update coefficients for next iteration: sg[j] *= alpha^j
+		i := n
+		for i > 0 {
+			// Calculate how many iterations we can batch
+			cnt := i
+			for j := 1; j <= numErrors; j++ {
+				sg[j] = (sg[j] & 0xffff) + (sg[j] >> 16)
+				maxIter := (himax - sg[j]) / j
+				if maxIter < cnt {
+					cnt = maxIter
+				}
+			}
+
+			// Fast inner loop - increment sg[j] by j for cnt iterations
+			i -= r.chienFast(sg, cnt, numErrors)
+
+			// Evaluate at current position
+			wk := 1
+			for j := 1; j <= numErrors; j++ {
+				wk ^= int(exp[sg[j]])
+			}
+
+			if wk == 0 {
+				last ^= int(exp[i])
+				positions[posIdx] = int(exp[i])
+				posIdx--
+				if posIdx == 0 {
+					positions[0] = last
+					if int(log[last]) >= n {
+						return nil
+					}
+					return positions
+				}
+			}
+		}
+		return nil
+	}
+
+	// Slow path - standard Chien search (for completeness)
+	sg := make([]int, numErrors+1)
+	for j := 1; j <= numErrors; j++ {
+		sg[j] = sigma[j]
+	}
+
+	for i := 0; i < n; i++ {
+		wk := 1
+		for j := 1; j <= numErrors; j++ {
+			wk ^= sg[j]
+		}
+
 		for j := 1; j <= numErrors; j++ {
 			sg[j] = r.galois.divExp(sg[j], j)
 		}
 
-		// If sum is 0, we found a root (error position)
-		if sum == 0 {
-			positions = append(positions, r.galois.toExp(i))
-			if len(positions) == numErrors {
+		if wk == 0 {
+			pv := r.galois.toExp(i)
+			last ^= pv
+			positions[posIdx] = pv
+			posIdx--
+			if posIdx == 0 {
+				if r.galois.toLog(last) >= n {
+					return nil
+				}
+				positions[0] = last
 				return positions
 			}
 		}
 	}
 
-	// Didn't find all roots - shouldn't happen for valid data
 	return nil
+}
+
+// chienFast performs fast inner loop for Chien search in log domain.
+// Returns the number of positions skipped (cnt - remaining).
+// This matches CueTools RsDecode.chienFast.
+func (r *RsDecode) chienFast(sg []int, cnt, jisu int) int {
+	start := cnt
+	exp := r.galois.expTbl
+
+	switch jisu {
+	case 2:
+		sg1, sg2 := sg[1], sg[2]
+		for cnt > 0 {
+			sg1++
+			sg2 += 2
+			cnt--
+			if (int(exp[sg1]) ^ int(exp[sg2])) == 1 {
+				break
+			}
+		}
+		sg[1], sg[2] = sg1, sg2
+
+	case 3:
+		sg1, sg2, sg3 := sg[1], sg[2], sg[3]
+		for cnt > 0 {
+			sg1++
+			sg2 += 2
+			sg3 += 3
+			cnt--
+			if (int(exp[sg1]) ^ int(exp[sg2]) ^ int(exp[sg3])) == 1 {
+				break
+			}
+		}
+		sg[1], sg[2], sg[3] = sg1, sg2, sg3
+
+	case 4:
+		sg1, sg2, sg3, sg4 := sg[1], sg[2], sg[3], sg[4]
+		for cnt > 0 {
+			sg1++
+			sg2 += 2
+			sg3 += 3
+			sg4 += 4
+			cnt--
+			if (int(exp[sg1]) ^ int(exp[sg2]) ^ int(exp[sg3]) ^ int(exp[sg4])) == 1 {
+				break
+			}
+		}
+		sg[1], sg[2], sg[3], sg[4] = sg1, sg2, sg3, sg4
+
+	default:
+		// General case for jisu >= 5
+		sg1, sg2, sg3, sg4, sg5 := sg[1], sg[2], sg[3], sg[4], sg[5]
+		for cnt > 0 {
+			sg1++
+			sg2 += 2
+			sg3 += 3
+			sg4 += 4
+			sg5 += 5
+			wkhi := int(exp[sg1]) ^ int(exp[sg2]) ^ int(exp[sg3]) ^ int(exp[sg4]) ^ int(exp[sg5])
+			for j := 6; j <= jisu; j++ {
+				sg[j] += j
+				wkhi ^= int(exp[sg[j]])
+			}
+			cnt--
+			if wkhi == 1 {
+				break
+			}
+		}
+		sg[1], sg[2], sg[3], sg[4], sg[5] = sg1, sg2, sg3, sg4, sg5
+	}
+
+	return start - cnt
 }
 
 // DetectErrors compares local and CTDB syndromes to detect errors.
@@ -154,15 +350,20 @@ func (r *RsDecode) DetectErrorsWithOffset(localSyn, ctdbSyn [][]uint16, stride, 
 	if len(localSyn) == 0 || len(ctdbSyn) == 0 {
 		return 0, nil
 	}
-	if len(localSyn) != len(ctdbSyn) || len(localSyn) != stride {
-		return -1, nil
+	// Allow syndromes to be different size - use minimum
+	synLen := len(localSyn)
+	if len(ctdbSyn) < synLen {
+		synLen = len(ctdbSyn)
+	}
+	if synLen > stride {
+		synLen = stride
 	}
 
 	sigma := make([]int, r.npar+1)
 	allPositions := make([]int, 0)
 
 	// Process each stride row (part2 in CueTools)
-	for part2 := 0; part2 < stride; part2++ {
+	for part2 := 0; part2 < synLen; part2++ {
 		// XOR syndromes to get error syndrome
 		errSyn := make([]int, r.npar)
 		hasError := false

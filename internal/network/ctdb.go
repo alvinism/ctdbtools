@@ -118,6 +118,7 @@ func (c *ctdbClient) Lookup(ctx context.Context, opts CTDBLookupOptions) (*CTDBR
 }
 
 // FetchParity downloads parity data for a specific entry.
+// Returns full syndrome matrix [stride, npar].
 func (c *ctdbClient) FetchParity(ctx context.Context, entry *CTDBEntry, npar int) ([][]uint16, error) {
 	if entry.HasParity == "" {
 		return nil, fmt.Errorf("no parity available for entry")
@@ -128,21 +129,13 @@ func (c *ctdbClient) FetchParity(ctx context.Context, entry *CTDBEntry, npar int
 		parityURL = c.baseURL + parityURL
 	}
 
-	// Calculate byte range for incremental fetch
-	prevLen := 0
-	if entry.Syndrome != nil && len(entry.Syndrome) > 0 {
-		prevLen = len(entry.Syndrome[0]) * entry.Stride * 2
-	}
-	rangeEnd := npar * entry.Stride * 2 - 1
-
+	// Always fetch full parity data (no incremental fetch for simplicity)
+	// CueTools supports incremental fetch but for our use case we just fetch all
 	req, err := http.NewRequestWithContext(ctx, "GET", parityURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", c.userAgent)
-	if prevLen > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", prevLen, rangeEnd))
-	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -254,10 +247,12 @@ func parseCTDBResponse(data []byte) (*CTDBResponse, error) {
 		}
 
 		// Parse syndrome from base64
+		// CueTools DBEntry.cs:30 parses syndrome with stride=1 (just first row for fast matching)
 		if xe.Syndrome != "" {
 			synData, err := base64.StdEncoding.DecodeString(xe.Syndrome)
 			if err == nil && len(synData) > 0 {
-				entry.Syndrome = parity.Bytes2Syndrome(entry.Stride, entry.Npar, synData)
+				// The syndrome in XML response is [1, npar] - just one row for fast offset detection
+				entry.Syndrome = parity.Bytes2Syndrome(1, entry.Npar, synData)
 			}
 		} else if xe.Parity != "" {
 			// Fall back to parity->syndrome conversion

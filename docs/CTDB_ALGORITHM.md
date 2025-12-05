@@ -195,9 +195,236 @@ CRC(A || B) = Combine(CRC(A), CRC(B), len(B))
 This uses the mathematical property that CRC32 is a linear function over GF(2).
 The implementation uses matrix exponentiation in GF(2) to efficiently combine CRCs.
 
+## Parity-Based Error Detection
+
+CTDB entries can include Reed-Solomon parity data that enables detection and localization of errors. This is what produces the "differs in X samples @MM:SS:FF" messages in CueTools.
+
+### Overview
+
+When you see output like:
+```
+Track 17 | (56/67) Differs in 381 samples @02:00:29-02:00:30,02:00:64-02:00:65,...
+```
+
+This means:
+- 56 out of 67 CTDB entries match this track exactly
+- 11 entries have differences, with the most common being 381 sample errors
+- The errors are located at specific time positions (MM:SS:FF format)
+
+### How Parity Works
+
+#### 1. LFSR-Style Syndrome Accumulation
+
+CueTools uses a Linear Feedback Shift Register (LFSR) style Reed-Solomon encoding during ripping. This is implemented in `AccurateRip.cs:SyndromeCalc8/16`:
+
+```
+For each audio sample:
+  1. XOR the sample with the first parity word
+  2. Look up encode table entries for both bytes of the XORed value
+  3. Shift the parity buffer left by 1 position
+  4. XOR in the encode table values at each position
+```
+
+This builds up a syndrome that represents the entire audio data in a compressed form. The key insight is that this is **systematic RS encoding** - each sample contributes to the syndrome through polynomial division in GF(2^16).
+
+Our implementation in `internal/accuraterip/parity.go:syndromeCalc()`:
+```go
+func (ps *ParityState) syndromeCalc(part int, sample uint16) {
+    // Get first parity word and XOR with input sample
+    wr0 := uint16(ps.ParityBuf[base]) | uint16(ps.ParityBuf[base+1])<<8
+    wrlo := wr0 ^ sample
+
+    // Lookup encode table entries for both bytes
+    loIdx := int(wrlo & 0xff)
+    hiIdx := int(wrlo >> 8)
+
+    // Shift left by 1 and XOR in encode table values
+    for j := 0; j < ps.MaxNpar-1; j++ {
+        next := ... // get next parity word
+        result := next ^ ps.EncodeTab[loIdx][0][j] ^ ps.EncodeTab[hiIdx][1][j]
+        // store result
+    }
+    // Last position gets just the table XOR (shifted in zero)
+}
+```
+
+#### 2. Stride-Based Interleaving
+
+The parity buffer is organized by "stride" - typically 11760 (10 CD frames × 588 samples × 2 channels). Each stride position maintains its own parity row, creating a 2D syndrome matrix:
+
+```
+Syndrome Matrix: [stride rows] × [npar columns]
+
+Row 0:    [syn0,0  syn0,1  syn0,2  ... syn0,7]
+Row 1:    [syn1,0  syn1,1  syn1,2  ... syn1,7]
+...
+Row 11759:[syn11759,0 ... syn11759,7]
+```
+
+The stridecount determines how many "data strides" are in the audio:
+```
+stridecount = ((finalSampleCount - pregap) * 2) / stride - 2
+```
+
+The `-2` excludes the first and last strides (lead-in/lead-out regions).
+
+#### 3. Offset-Independent Syndrome Comparison
+
+Different CD drives have different read offsets. To compare syndromes across offsets:
+
+1. **Lead-in/Lead-out Buffers**: Store samples at the boundaries
+2. **Syndrome Adjustment**: Use Galois field arithmetic to adjust for offset:
+   ```go
+   // For positions affected by offset, adjust syndrome:
+   synI = g.MulExp(synI, i)
+   synI ^= leadOut[...] ^ g.MulExp(leadIn[...], (i*strideCount)%g.MaxVal())
+   ```
+
+### Error Detection Algorithm
+
+#### Step 1: Syndrome XOR
+
+XOR the local syndrome with the CTDB syndrome:
+```go
+xorSyn := XORSyndromes(localSyn, ctdbSyn)
+if IsZeroSyndrome(xorSyn) {
+    // Perfect match - no errors
+}
+```
+
+#### Step 2: Berlekamp-Massey Algorithm
+
+Find the error locator polynomial σ(x) using the modified Berlekamp-Massey algorithm (`CalcSigmaMBM`):
+
+```go
+// Initialize
+sg0[1] = 1  // B(x) = x
+sg1[0] = 1  // σ(x) = 1
+jisu0, jisu1 = 1, 0
+m = -1
+
+for n := 0; n < npar; n++ {
+    // Calculate discrepancy
+    d := syndrome[n]
+    for i := 1; i <= jisu1; i++ {
+        d ^= galois.mul(sg1[i], syndrome[n-i])
+    }
+
+    if d != 0 {
+        // Update polynomials using CueTools method
+        // Key: wk[i] = sg1[i] ^ mulExp(sg0[i], logd)
+    }
+
+    // Shift sg0 AFTER the update (key difference from standard BM)
+}
+```
+
+The result `jisu1` is the number of errors detected.
+
+#### Step 3: Chien Search
+
+Find error positions using Chien search. For GF(2^16), CueTools has an optimized fast path:
+
+```go
+// Convert sigma to log domain
+for j := 1; j <= numErrors; j++ {
+    sg[j] = log[sigma[j]] - ((j * n) % 0xffff) + 0xffff
+}
+
+// Fast search using batched iterations
+for i > 0 {
+    // Evaluate σ(α^(-i))
+    wk := 1
+    for j := 1; j <= numErrors; j++ {
+        wk ^= exp[sg[j]]
+    }
+    if wk == 0 {
+        // Found a root - error at position i
+        positions[posIdx] = exp[i]
+    }
+}
+```
+
+#### Step 4: Position Mapping
+
+Convert GF elements to sample positions (CueTools CDRepair.cs:212-213):
+
+```go
+// pos is a GF element, convert using toPos: length - 1 - log(pos)
+gfPos := galois.toPos(stridecount, pos)
+samplePos := gfPos * stride + part2
+
+// Apply offset and pregap adjustments
+erroffi := stride + samplePos + pregap - actualOffset*2
+```
+
+### Offset Search for Non-Matching Entries
+
+When an entry's CRC doesn't match at any obvious offset, but we want to try parity-based detection:
+
+```go
+// Try priority offsets first (detected offset, best offset, 0)
+for _, tryOff := range offsetsToTry {
+    success, errCount, errPositions := tryOffset(tryOff)
+    if success {
+        break
+    }
+}
+
+// If still not found, search the full ±arOffsetRange
+if !foundMatch {
+    for searchOff := -arOffsetRange; searchOff <= arOffsetRange; searchOff++ {
+        success, errCount, errPositions := tryOffset(searchOff)
+        if success {
+            break
+        }
+    }
+}
+```
+
+This is necessary because CTDB entries may have been submitted by users with different drive offsets.
+
+### Key Parameters
+
+| Parameter | Typical Value | Description |
+|-----------|---------------|-------------|
+| npar | 8 | Number of parity symbols (max correctable errors = npar/2 = 4 per stride row) |
+| stride | 11760 | Interleaving factor (10 CD frames × 588 × 2) |
+| stridecount | varies | `((finalSampleCount - pregap) * 2) / stride - 2` |
+| arOffsetRange | 2939 | Maximum offset search range (5×588 - 1 samples) |
+
+### Output Format
+
+Errors are formatted as CD time positions (MM:SS:FF where FF is frames, 75 per second):
+
+```go
+// Convert 16-bit sample position to frames
+// 1 frame = 588 stereo samples = 1176 16-bit samples
+frame := samplePos / 1176
+mm := frame / 75 / 60
+ss := (frame / 75) % 60
+ff := frame % 75
+```
+
+Nearby errors (within 5 frames = 5880 16-bit samples) are coalesced into ranges:
+```
+@02:00:29-02:00:30,02:00:64-02:00:65,...
+```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `internal/accuraterip/parity.go` | LFSR-style syndrome accumulation, lead-in/out buffers |
+| `internal/parity/galois.go` | GF(2^16) arithmetic operations |
+| `internal/parity/rsdecode.go` | Berlekamp-Massey, Chien search, position formatting |
+| `internal/parity/paritytosyndrome.go` | Syndrome ↔ parity byte conversions |
+| `internal/cli/commands.go` | Orchestrates verification with offset search |
+
 ## References
 
 - [CUETools Database Wiki](http://cue.tools/wiki/CUETools_Database)
 - [CUETools Source Code](https://github.com/gchudov/cuetools.net)
   - `CUETools.AccurateRip/AccurateRip.cs` - CRC calculation
   - `CUETools.AccurateRip/CDRepair.cs` - Offset finding algorithm
+  - `CUETools.Parity/RsDecode.cs` - Reed-Solomon decoder

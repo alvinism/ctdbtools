@@ -26,12 +26,13 @@ type ParityState struct {
 // NewParityState initializes parity buffer and encode table for given stride/npar.
 // pregap is in frames, finalSampleCount is total audio samples (AudioLength * 588).
 func NewParityState(stride, npar, pregap, finalSampleCount int) *ParityState {
-	// stridecount = (finalSampleCount - pregap*588) * 2 / stride
-	// This is the number of strides in the parity window.
+	// stridecount = ((finalSampleCount - pregap*588) * 2) / stride - 2
+	// The -2 accounts for leadin and leadout strides excluded from RS codeword.
+	// This matches CueTools CDRepair.cs:30.
 	dataSamples := finalSampleCount - pregap*588
 	strideCount := 1
 	if stride > 0 && dataSamples > 0 {
-		strideCount = (dataSamples * 2) / stride
+		strideCount = (dataSamples * 2) / stride - 2
 	}
 
 	ps := &ParityState{
@@ -114,35 +115,62 @@ func (ps *ParityState) AddSamples(samples []uint32) {
 		doParity := currentStride >= 1 && currentStride <= ps.strideCount
 
 		if doParity {
-			// Process low word (left channel)
-			lo := byte(s & 0xff)
-			loHi := byte((s >> 8) & 0xff)
-			part := currentPart
-			for j := 0; j < ps.MaxNpar; j++ {
-				idx := part*ps.MaxNpar*2 + j*2
-				cur := uint16(ps.ParityBuf[idx]) | uint16(ps.ParityBuf[idx+1])<<8
-				cur ^= ps.EncodeTab[lo][0][j]
-				cur ^= ps.EncodeTab[loHi][1][j]
-				ps.ParityBuf[idx] = byte(cur)
-				ps.ParityBuf[idx+1] = byte(cur >> 8)
-			}
+			// Process low word (left channel) using LFSR-style encoding
+			ps.syndromeCalc(currentPart, uint16(s&0xffff))
 
-			// Process high word (right channel)
-			hi := byte((s >> 16) & 0xff)
-			hiHi := byte((s >> 24) & 0xff)
-			part = (currentPart + 1) % ps.Stride
-			for j := 0; j < ps.MaxNpar; j++ {
-				idx := part*ps.MaxNpar*2 + j*2
-				cur := uint16(ps.ParityBuf[idx]) | uint16(ps.ParityBuf[idx+1])<<8
-				cur ^= ps.EncodeTab[hi][0][j]
-				cur ^= ps.EncodeTab[hiHi][1][j]
-				ps.ParityBuf[idx] = byte(cur)
-				ps.ParityBuf[idx+1] = byte(cur >> 8)
-			}
+			// Process high word (right channel) at next stride position
+			nextPart := (currentPart + 1) % ps.Stride
+			ps.syndromeCalc(nextPart, uint16(s>>16))
 		}
 
 		ps.sampleCount++
 	}
+}
+
+// syndromeCalc performs LFSR-style Reed-Solomon parity accumulation.
+// This mirrors CueTools AccurateRip.cs SyndromeCalc8/SyndromeCalc16.
+//
+// The algorithm:
+//  1. XOR input sample with first parity word
+//  2. Look up encode table entries for both bytes of the XORed value
+//  3. Shift parity buffer left by 1 position
+//  4. XOR in the encode table values
+//
+// This is systematic RS encoding where each sample contributes to the syndrome
+// through polynomial division in GF(2^16).
+func (ps *ParityState) syndromeCalc(part int, sample uint16) {
+	base := part * ps.MaxNpar * 2
+
+	// Get first parity word and XOR with input sample
+	// CueTools: ushort wrlo = (ushort)(wr[0] ^ lo);
+	wr0 := uint16(ps.ParityBuf[base]) | uint16(ps.ParityBuf[base+1])<<8
+	wrlo := wr0 ^ sample
+
+	// Lookup encode table entries for both bytes
+	// CueTools: ushort* ptiblo0 = pt + (wrlo & 255) * maxNpar * 2;
+	// CueTools: ushort* ptiblo1 = pt + (wrlo >> 8) * maxNpar * 2 + maxNpar;
+	loIdx := int(wrlo & 0xff)
+	hiIdx := int(wrlo >> 8)
+
+	// Shift parity buffer left by 1 position and XOR in encode table values
+	// CueTools (for maxNpar=8):
+	// ((ulong*)wr)[0] = ((ulong*)(wr + 1))[0] ^ ((ulong*)ptiblo0)[0] ^ ((ulong*)ptiblo1)[0];
+	// ((ulong*)wr)[1] = (((ulong*)(wr))[1] >> 16) ^ ((ulong*)ptiblo0)[1] ^ ((ulong*)ptiblo1)[1];
+	//
+	// This shifts the parity array left by one uint16 and XORs in the table values.
+	for j := 0; j < ps.MaxNpar-1; j++ {
+		nextOff := base + (j+1)*2
+		next := uint16(ps.ParityBuf[nextOff]) | uint16(ps.ParityBuf[nextOff+1])<<8
+		result := next ^ ps.EncodeTab[loIdx][0][j] ^ ps.EncodeTab[hiIdx][1][j]
+		ps.ParityBuf[base+j*2] = byte(result)
+		ps.ParityBuf[base+j*2+1] = byte(result >> 8)
+	}
+
+	// Last position gets just the table XOR (shifted in zero from the right)
+	lastIdx := ps.MaxNpar - 1
+	last := ps.EncodeTab[loIdx][0][lastIdx] ^ ps.EncodeTab[hiIdx][1][lastIdx]
+	ps.ParityBuf[base+lastIdx*2] = byte(last)
+	ps.ParityBuf[base+lastIdx*2+1] = byte(last >> 8)
 }
 
 func minInt(a, b int) int {
@@ -157,29 +185,72 @@ func (ps *ParityState) Syndrome() [][]uint16 {
 	return parity.Parity2Syndrome(ps.Stride, ps.Stride, ps.MaxNpar, ps.MaxNpar, ps.ParityBuf, 0, 0)
 }
 
-// SyndromeWithOffset adjusts syndrome for drive offset using lead-in/out buffers similar to CUETools AccurateRip.GetSyndrome.
+// SyndromeWithOffset adjusts syndrome for drive offset using lead-in/out buffers.
+// This mirrors CueTools AccurateRipVerify.GetSyndrome.
+//
+// The problem: Different CD drives read at different offsets. If we computed
+// syndrome at offset 0, but the CTDB entry was submitted at offset +667, the
+// syndromes won't match even for identical audio.
+//
+// The solution: Use lead-in and lead-out buffers to adjust the syndrome.
+// - Lead-in buffer: Samples at the start of the disc (before first track data)
+// - Lead-out buffer: Samples at the end of the disc (after last track data)
+//
+// When adjusting for offset:
+// - Positive offset: Include samples from lead-out, exclude from lead-in
+// - Negative offset: Include samples from lead-in, exclude from lead-out
+//
+// The adjustment uses Galois field arithmetic to "rotate" the syndrome:
+//   synI = g.MulExp(synI, i)  // multiply by α^i
+//   synI ^= leadOut[...] ^ g.MulExp(leadIn[...], (i*strideCount)%max)
+//
+// This allows comparing syndromes computed at different offsets without
+// reprocessing the entire audio file.
 func (ps *ParityState) SyndromeWithOffset(offset int, strides int) [][]uint16 {
 	if strides == -1 || strides == 0 {
 		strides = ps.Stride
 	}
+
+	// Check offset is within buffer bounds
+	// leadIn is at least max(4096*4, stride*2), leadOut is at least max(4096*4, stride+stride)
+	maxOffset := len(ps.leadIn) / 4 // Conservative: allow offset*2 up to quarter of buffer
+	if offset > maxOffset || offset < -maxOffset {
+		return nil // Offset too large for buffer
+	}
+
 	syn := parity.Parity2Syndrome(strides, ps.Stride, ps.MaxNpar, ps.MaxNpar, ps.ParityBuf, 0, -offset*2)
 	g := parity.Galois16
 	// mirror CUETools AccurateRipVerify.GetSyndrome leadin/leadout adjustments
 	for part2 := 0; part2 < strides; part2++ {
 		part := (part2 + offset*2 + ps.Stride) % ps.Stride
+		if part < 0 {
+			part += ps.Stride
+		}
 		if part < offset*2 {
+			leadOutIdx := ps.LastStride - part - 1
+			leadInIdx := ps.Stride + part
+			// Bounds check
+			if leadOutIdx < 0 || leadOutIdx >= len(ps.leadOut) || leadInIdx < 0 || leadInIdx >= len(ps.leadIn) {
+				continue
+			}
 			for i := 0; i < ps.MaxNpar; i++ {
 				synI := int(syn[part2][i])
 				synI = g.MulExp(synI, i)
-				synI ^= int(ps.leadOut[ps.LastStride-part-1]) ^ g.MulExp(int(ps.leadIn[ps.Stride+part]), (i*ps.strideCount)%g.MaxVal())
+				synI ^= int(ps.leadOut[leadOutIdx]) ^ g.MulExp(int(ps.leadIn[leadInIdx]), (i*ps.strideCount)%g.MaxVal())
 				syn[part2][i] = uint16(synI)
 			}
 		}
 		if part >= ps.Stride+offset*2 {
+			leadOutIdx := ps.LastStride + ps.Stride - part - 1
+			leadInIdx := part
+			// Bounds check
+			if leadOutIdx < 0 || leadOutIdx >= len(ps.leadOut) || leadInIdx < 0 || leadInIdx >= len(ps.leadIn) {
+				continue
+			}
 			for i := 0; i < ps.MaxNpar; i++ {
 				synI := int(syn[part2][i])
 				// subtract leadout and leadin, then divide by a^i
-				synI ^= int(ps.leadOut[ps.LastStride+ps.Stride-part-1]) ^ g.MulExp(int(ps.leadIn[part]), (i*ps.strideCount)%g.MaxVal())
+				synI ^= int(ps.leadOut[leadOutIdx]) ^ g.MulExp(int(ps.leadIn[leadInIdx]), (i*ps.strideCount)%g.MaxVal())
 				synI = g.DivExp(synI, i)
 				syn[part2][i] = uint16(synI)
 			}

@@ -53,6 +53,9 @@ func Syndrome2Bytes(in [][]uint16) []byte {
 }
 
 // Bytes2Syndrome converts parity bytes into syndrome matrix.
+// Matches CueTools ParityToSyndrome.Bytes2Syndrome:
+//   ppar[j + i * stride] -> psyn[i + j * npar]
+// Parity bytes are stored column-major: npar groups of stride uint16 values.
 func Bytes2Syndrome(stride, npar int, parity []byte) [][]uint16 {
 	if len(parity) < npar*stride*2 {
 		return nil
