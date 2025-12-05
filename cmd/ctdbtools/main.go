@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"ctdbtool/internal/cli"
+	"ctdbtools/internal/cli"
 )
 
 func main() {

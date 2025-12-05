@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"ctdbtools/internal/version"
 )
 
 // HTTPClient provides a configurable HTTP client for network operations.
@@ -54,7 +56,7 @@ func NewHTTPClient(opts ...Option) *HTTPClient {
 	c := &HTTPClient{
 		connectTimeout: 15 * time.Second,
 		socketTimeout:  30 * time.Second,
-		userAgent:      "ctdbtool/1.0",
+		userAgent:      "ctdbtools/" + version.Version,
 	}
 
 	for _, opt := range opts {

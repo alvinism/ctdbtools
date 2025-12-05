@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"ctdbtool/internal/accuraterip"
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/toc"
 )
 
 // ProcessPCM streams PCM reader through the AccurateRip processor based on layout.

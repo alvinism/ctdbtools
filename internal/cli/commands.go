@@ -3,12 +3,16 @@ package cli
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"time"
 
-	"ctdbtool/internal/accuraterip"
-	"ctdbtool/internal/ingest"
-	"ctdbtool/internal/network"
-	"ctdbtool/internal/parity"
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/ingest"
+	"ctdbtools/internal/logparse"
+	"ctdbtools/internal/network"
+	"ctdbtools/internal/parity"
+	"ctdbtools/internal/toc"
+	"ctdbtools/internal/version"
 )
 
 // VerifyOptions holds parameters for a verify run.
@@ -16,6 +20,7 @@ type VerifyOptions struct {
 	AudioPath  string
 	Layout     toc.Layout
 	CuePath    string
+	DirPath    string // Directory path for auto-discovery mode
 	Stride     int
 	LastStride int
 	Npar       int
@@ -28,6 +33,11 @@ type VerifyOptions struct {
 
 // Verify runs a verification pass (decode PCM, compute CRCs/parity, query databases).
 func Verify(ctx context.Context, opts VerifyOptions) error {
+	// Print log header (CueTools format)
+	fmt.Printf("[CTDBTools log; Date: %s; Version: %s]\n",
+		time.Now().Format("2006/01/02 15:04:05"),
+		version.Version)
+
 	var layout toc.Layout
 	var sheet ingest.CueSheet
 	var useCueSheet bool
@@ -41,6 +51,15 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	if opts.Layout.AudioTracks > 0 {
 		// Layout provided directly
 		layout = opts.Layout
+	} else if opts.DirPath != "" {
+		// Auto-discover mode: scan directory for audio files
+		var err error
+		sheet, err = ingest.DiscoverDirectory(ctx, opts.DirPath)
+		if err != nil {
+			return fmt.Errorf("failed to discover audio files: %w", err)
+		}
+		layout = sheet.Layout
+		useCueSheet = true
 	} else if opts.CuePath != "" {
 		// Parse CUE sheet with split track support
 		var err error
@@ -51,7 +70,7 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 		layout = sheet.Layout
 		useCueSheet = true
 	} else {
-		return fmt.Errorf("layout or cue path required")
+		return fmt.Errorf("path required (CUE file or directory)")
 	}
 
 	// Process audio
@@ -131,16 +150,14 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	}
 	opts.LastStride = lastStride // update opts for debug output
 
-	// Display TOCID
-	tocID, err := layout.TOCID()
-	if err != nil {
-		fmt.Printf("TOCID: (error: %v)\n", err)
-	} else {
-		fmt.Printf("TOCID: %s\n", tocID)
-	}
-
 	// Debug output: dump layout and CRC state
 	if opts.Debug {
+		tocID, err := layout.TOCID()
+		if err != nil {
+			fmt.Printf("TOCID: (error: %v)\n", err)
+		} else {
+			fmt.Printf("TOCID: %s\n", tocID)
+		}
 		printDebugLayout(layout, opts.Stride, opts.LastStride)
 		// Also print AudioLayout and Sources for split tracks
 		if useCueSheet && sheet.IsSplitTrack() {
@@ -152,65 +169,75 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 			}
 			fmt.Println("===========================")
 		}
-	}
 
-	// Display per-track CRCs
-	fmt.Println("\nTrack  [ CRC32  ] [W/O NULL] [  AR   |   V2   ]")
-	for track := 1; track <= layout.AudioTracks; track++ {
-		crc32 := proc.TrackCRC(track, 0)
-		crcwn := proc.TrackCRCWONULL(track, 0)
-		crcar := proc.TrackCRCAR(track)
-		crcv2 := proc.TrackCRCV2(track)
-		fmt.Printf(" %02d    [%08X] [%08X] [%08x|%08x]\n", track, crc32, crcwn, crcar, crcv2)
-
-		// Debug: show CTDB CRC calculation details
-		if opts.Debug {
+		// Debug CTDB CRC details
+		for track := 1; track <= layout.AudioTracks; track++ {
 			ctdbCRC := proc.TrackCTDBCRC(track, 0, opts.Stride, opts.LastStride)
-			fmt.Printf("       CTDB CRC: %08X (stride=%d, laststride=%d)\n", ctdbCRC, opts.Stride, opts.LastStride)
+			fmt.Printf("Track %02d CTDB CRC: %08X (stride=%d, laststride=%d)\n", track, ctdbCRC, opts.Stride, opts.LastStride)
 
-			// For first and last track, show detailed calculation
 			if track == 1 || track == layout.AudioTracks {
 				printDebugCTDBCRC(proc, layout, track, opts.Stride, opts.LastStride)
 			}
 		}
-	}
-
-	// Display disc-wide CRC
-	discCRC := proc.TrackCRC(0, 0)
-	discCRCWN := proc.TrackCRCWONULL(0, 0)
-	fmt.Printf(" --    [%08X] [%08X]\n", discCRC, discCRCWN)
-
-	if opts.Debug {
 		discCTDBCRC := proc.DiscCTDBCRC(0, opts.Stride, opts.LastStride)
-		fmt.Printf("       Disc CTDB CRC: %08X\n", discCTDBCRC)
+		fmt.Printf("Disc CTDB CRC: %08X\n", discCTDBCRC)
 		printDebugRollingTables(proc, layout.AudioTracks)
-	}
 
-	if opts.CalcParity {
-		syn := proc.Syndrome()
-		fmt.Printf("\nSyndrome rows: %d\n", len(syn))
-		if len(syn) > 0 {
-			fmt.Printf("Local Syndrome[0]: %v\n", syn[0])
-			fmt.Printf("Local Syndrome[1]: %v\n", syn[1])
+		if opts.CalcParity {
+			syn := proc.Syndrome()
+			fmt.Printf("\nSyndrome rows: %d\n", len(syn))
+			if len(syn) > 0 {
+				fmt.Printf("Local Syndrome[0]: %v\n", syn[0])
+				fmt.Printf("Local Syndrome[1]: %v\n", syn[1])
+			}
+			parBuf := proc.Parity().State().ParityBuf
+			fmt.Printf("ParityBuf[0:32]: %v\n", parBuf[:32])
 		}
-		// Check raw parity buffer
-		parBuf := proc.Parity().State().ParityBuf
-		fmt.Printf("ParityBuf[0:32]: %v\n", parBuf[:32])
+		fmt.Println()
 	}
 
-	// Query AccurateRip if requested
-	if opts.QueryAR {
-		if err := queryAccurateRip(ctx, layout, proc, opts.Verbose); err != nil {
-			fmt.Printf("AccurateRip: %v\n", err)
-		}
-	}
-
-	// Query CTDB if requested
+	// Query CTDB first (matches CueTools output order)
 	if opts.QueryCTDB {
 		if err := queryCTDB(ctx, layout, proc, opts.Verbose); err != nil {
-			fmt.Printf("CTDB: %v\n", err)
+			// Print TOCID with error status
+			tocID, tocErr := layout.TOCID()
+			if tocErr != nil {
+				fmt.Printf("[CTDB TOCID: (error: %v)] database access error: %v.\n", tocErr, err)
+			} else {
+				fmt.Printf("[CTDB TOCID: %s] database access error: %v.\n", tocID, err)
+			}
 		}
 	}
+
+	// Query AccurateRip
+	if opts.QueryAR {
+		if err := queryAccurateRip(ctx, layout, proc, opts.Verbose); err != nil {
+			// Print AccurateRip ID with error status
+			arID, _ := layout.AccurateRipID()
+			if arID != "" {
+				fmt.Printf("\n[AccurateRip ID: %s] database access error: %v.\n", arID, err)
+			} else {
+				fmt.Printf("\nAccurateRip: database access error: %v.\n", err)
+			}
+		}
+	}
+
+	// Try to find and parse log file for LOG column
+	var logData *logparse.LogData
+	logDir := ""
+	if opts.DirPath != "" {
+		logDir = opts.DirPath
+	} else if opts.CuePath != "" {
+		logDir = filepath.Dir(opts.CuePath)
+	}
+	if logDir != "" {
+		if logPath := logparse.FindLogFile(logDir); logPath != "" {
+			logData, _ = logparse.ParseLogFile(logPath) // Ignore errors, LOG column is optional
+		}
+	}
+
+	// Display Track CRC table at the end (CueTools format)
+	printTrackCRCTable(proc, layout.AudioTracks, logData)
 
 	return nil
 }
@@ -226,19 +253,19 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 		return fmt.Errorf("failed to compute AccurateRip ID: %w", err)
 	}
 
-	fmt.Printf("\n[AccurateRip ID: %s]\n", arID)
-
 	httpClient := network.NewHTTPClient()
 	arClient := network.NewAccurateRipClient(httpClient)
 
 	resp, err := arClient.Query(ctx, arID, layout.AudioTracks)
 	if err != nil {
 		if err == network.ErrNotFound {
-			fmt.Println("AccurateRip: Disc not found in database")
+			fmt.Printf("\n[AccurateRip ID: %s] not found.\n", arID)
 			return nil
 		}
 		return err
 	}
+
+	fmt.Printf("\n[AccurateRip ID: %s] found.\n", arID)
 
 	fmt.Printf("AccurateRip: Found %d pressing(s)\n", len(resp.Disks))
 
@@ -400,7 +427,7 @@ func getTrackSampleRange(layout toc.Layout, track int) (min, max int) {
 // 3. Aggregate matches and display per-track status with "differs" info
 func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, verbose bool) error {
 	tocStr := layout.TOCString()
-	fmt.Printf("\nCTDB TOC: %s\n", tocStr)
+	tocID, tocErr := layout.TOCID()
 
 	httpClient := network.NewHTTPClient()
 	ctdbClient := network.NewCTDBClient(httpClient)
@@ -413,12 +440,24 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	})
 	if err != nil {
 		if err == network.ErrNotFound {
-			fmt.Println("CTDB: Disc not found in database")
+			// Print TOCID with "not found" status
+			if tocErr != nil {
+				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
+			} else {
+				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
+			}
 			return nil
 		}
 		return err
 	}
 
+	// Print TOCID with "found" status
+	if tocErr != nil {
+		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
+	} else {
+		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
+	}
+	fmt.Printf("CTDB TOC: %s\n", tocStr)
 	fmt.Printf("CTDB: Found %d entries (total confidence: %d)\n", len(resp.Entries), resp.Total)
 
 	// Per-track confidence tracking
@@ -1136,4 +1175,64 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 	sheet.AudioLayout.Leadout = audioCumulative
 
 	return nil
+}
+
+// printTrackCRCTable displays the Track/CRC table in CueTools format.
+// This includes Track Peak, CRC32, W/O NULL, and optionally LOG columns.
+func printTrackCRCTable(proc *accuraterip.Processor, audioTracks int, logData *logparse.LogData) {
+	// CueTools format: Track Peak [ CRC32  ] [W/O NULL] [  LOG   ]
+	hasLogData := logData != nil && len(logData.Tracks) > 0
+	if hasLogData {
+		fmt.Println("\nTrack Peak [ CRC32  ] [W/O NULL] [  LOG   ]")
+	} else {
+		fmt.Println("\nTrack Peak [ CRC32  ] [W/O NULL]")
+	}
+
+	// Display disc-wide row first (CueTools format)
+	discCRC := proc.TrackCRC(0, 0)
+	discCRCWN := proc.TrackCRCWONULL(0, 0)
+	discPeak := proc.TrackPeak(0)
+	if hasLogData {
+		logStatus := getLogStatus(discCRC, discCRCWN, &logData.Disc)
+		fmt.Printf(" -- %5.1f [%08X] [%08X] %s\n", discPeak, discCRC, discCRCWN, logStatus)
+	} else {
+		fmt.Printf(" -- %5.1f [%08X] [%08X]\n", discPeak, discCRC, discCRCWN)
+	}
+
+	// Then per-track rows
+	for track := 1; track <= audioTracks; track++ {
+		crc32 := proc.TrackCRC(track, 0)
+		crcwn := proc.TrackCRCWONULL(track, 0)
+		peak := proc.TrackPeak(track)
+		if hasLogData && track <= len(logData.Tracks) {
+			logStatus := getLogStatus(crc32, crcwn, &logData.Tracks[track-1])
+			fmt.Printf(" %02d %5.1f [%08X] [%08X] %s\n", track, peak, crc32, crcwn, logStatus)
+		} else {
+			fmt.Printf(" %02d %5.1f [%08X] [%08X]\n", track, peak, crc32, crcwn)
+		}
+	}
+}
+
+// getLogStatus returns the LOG column status comparing computed CRCs with log file
+func getLogStatus(crc32, crcwn uint32, logTrack *logparse.TrackLogData) string {
+	if logTrack == nil || (!logTrack.HasCRC32 && !logTrack.HasCRCWONULL) {
+		return "          "
+	}
+
+	// Check if log CRC matches computed CRC32
+	if logTrack.HasCRC32 && logTrack.CRC32 == crc32 {
+		return "  CRC32   "
+	}
+
+	// Check if log CRC matches computed W/O NULL
+	if logTrack.HasCRCWONULL && logTrack.CRCWONULL == crcwn {
+		return " W/O NULL "
+	}
+
+	// If log has CRC but doesn't match, show the log CRC
+	if logTrack.HasCRC32 {
+		return fmt.Sprintf("[%08X]", logTrack.CRC32)
+	}
+
+	return "          "
 }

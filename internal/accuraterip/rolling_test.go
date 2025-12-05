@@ -3,7 +3,7 @@ package accuraterip
 import (
 	"testing"
 
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/toc"
 )
 
 // tiny TOC: one audio track starting at 0 length 3 frames (3*588 samples)

@@ -1,8 +1,8 @@
 package accuraterip
 
 import (
-	"ctdbtool/internal/hashes"
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/hashes"
+	"ctdbtools/internal/toc"
 )
 
 // TrackStats holds per-track checksum results mirroring CUETools AccurateRip fields.

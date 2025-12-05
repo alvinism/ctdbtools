@@ -3,11 +3,24 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
 	"strings"
 )
+
+// CheckDependencies verifies that required external tools (ffmpeg, ffprobe) are available.
+// Returns an error with a helpful message if any dependency is missing.
+func CheckDependencies() error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg not found in PATH: please install ffmpeg, if you already have it installed, ensure it is in your PATH")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return fmt.Errorf("ffprobe not found in PATH: please install ffmpeg, if you already have it installed, ensure it is in your PATH")
+	}
+	return nil
+}
 
 // PCMStream invokes ffmpeg to decode an input file to 16-bit stereo PCM @ 44.1kHz, returning a reader.
 func PCMStream(ctx context.Context, input string) (io.ReadCloser, *exec.Cmd, error) {

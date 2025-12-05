@@ -3,7 +3,7 @@ package accuraterip
 import (
 	"testing"
 
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/toc"
 )
 
 func TestProcessorCRCFlow(t *testing.T) {

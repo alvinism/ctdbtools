@@ -1,6 +1,6 @@
 package accuraterip
 
-import "ctdbtool/internal/toc"
+import "ctdbtools/internal/toc"
 
 // Processor coordinates rolling CRCs and parity aggregation while streaming PCM samples.
 // This mirrors CueTools AccurateRipVerify - samples are fed in order across all tracks.
@@ -13,6 +13,8 @@ type Processor struct {
 	leadIn       int
 	leadOut      int
 	totalSamples int
+	// Peak amplitude tracking (per track, 0 = disc-wide)
+	peak []int32 // Max absolute sample value per track (0..AudioTracks)
 }
 
 // NewProcessor builds a processor with the given stride/laststride and npar settings.
@@ -36,6 +38,7 @@ func NewProcessor(layout toc.Layout, stride, laststride, npar int, calcParity bo
 		layout:  layout,
 		rolling: NewRollingTables(layout, stride, laststride, calcParity),
 		parity:  parityAgg,
+		peak:    make([]int32, layout.AudioTracks+1), // 0 for disc, 1..N for tracks
 	}
 }
 
@@ -69,6 +72,34 @@ func (p *Processor) Feed(samples []uint32) {
 	p.rolling.FeedSamples(p.currentTrack, p.trackSamples, p.totalSamples, samples)
 	if p.parity != nil {
 		p.parity.FeedSamples(samples)
+	}
+	// Track peak amplitude
+	for _, s := range samples {
+		// Extract left and right channels (16-bit signed)
+		left := int16(s & 0xFFFF)
+		right := int16(s >> 16)
+		// Convert to absolute value
+		absL := int32(left)
+		if absL < 0 {
+			absL = -absL
+		}
+		absR := int32(right)
+		if absR < 0 {
+			absR = -absR
+		}
+		// Find maximum
+		maxSample := absL
+		if absR > maxSample {
+			maxSample = absR
+		}
+		// Update track peak
+		if maxSample > p.peak[p.currentTrack] {
+			p.peak[p.currentTrack] = maxSample
+		}
+		// Update disc peak
+		if maxSample > p.peak[0] {
+			p.peak[0] = maxSample
+		}
 	}
 	p.trackSamples += len(samples)
 }
@@ -172,4 +203,15 @@ func (p *Processor) TrackCTDBCRC(track, offset, stride, laststride int) uint32 {
 // stride and laststride are parity parameters (samples); the function uses stride/2 and laststride/2.
 func (p *Processor) DiscCTDBCRC(offset, stride, laststride int) uint32 {
 	return p.rolling.CTDBCRCWithOffset(0, offset, stride/2, laststride/2, &p.layout)
+}
+
+// TrackPeak returns the peak amplitude for a track as a percentage (0-100).
+// track is 1-based audio track number, 0 for disc-wide peak.
+func (p *Processor) TrackPeak(track int) float64 {
+	if track < 0 || track >= len(p.peak) {
+		return 0
+	}
+	// 16-bit signed audio: max value is 32767 (INT16_MAX)
+	// Return as percentage of full scale
+	return float64(p.peak[track]) / 32768.0 * 100.0
 }

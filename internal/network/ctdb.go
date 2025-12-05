@@ -12,7 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"ctdbtool/internal/parity"
+	"ctdbtools/internal/parity"
+	"ctdbtools/internal/version"
 )
 
 const (
@@ -52,7 +53,7 @@ func NewCTDBClient(httpClient *HTTPClient, opts ...CTDBClientOption) CTDBClient 
 	c := &ctdbClient{
 		http:      httpClient,
 		baseURL:   "http://" + ctdbDefaultServer,
-		userAgent: "ctdbtool/1.0",
+		userAgent: "ctdbtools/" + version.Version,
 	}
 	for _, opt := range opts {
 		opt(c)

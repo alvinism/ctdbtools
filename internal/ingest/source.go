@@ -1,6 +1,6 @@
 package ingest
 
-import "ctdbtool/internal/toc"
+import "ctdbtools/internal/toc"
 
 // SourceSegment represents a contiguous audio segment from a file.
 // This mirrors CueTools' SourceInfo struct.

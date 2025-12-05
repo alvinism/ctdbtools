@@ -3,8 +3,8 @@ package accuraterip
 import (
 	"fmt"
 
-	"ctdbtool/internal/hashes"
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/hashes"
+	"ctdbtools/internal/toc"
 )
 
 // RollingTables mirrors CUETools' rolling CRC arrays for AccurateRip/CTDB offset calculations.

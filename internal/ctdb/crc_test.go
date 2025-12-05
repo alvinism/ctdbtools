@@ -3,7 +3,7 @@ package ctdb
 import (
 	"testing"
 
-	"ctdbtool/internal/accuraterip"
+	"ctdbtools/internal/accuraterip"
 )
 
 func TestTrackCRCOffsets(t *testing.T) {

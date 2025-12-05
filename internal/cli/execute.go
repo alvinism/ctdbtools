@@ -5,73 +5,104 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+
+	"ctdbtools/internal/ingest"
 
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ctdbtool",
+	Use:   "ctdbtools",
 	Short: "CUETools database verification tool",
 	Long:  `A CLI tool that replicates CUETools verify/repair functionality for CD ripping verification.`,
 }
 
 var verifyCmd = &cobra.Command{
-	Use:   "verify [audio-file]",
+	Use:   "verify <path>",
 	Short: "Verify audio file against AccurateRip and CTDB databases",
-	Long: `Verify an audio file (FLAC, WAV, etc.) against the AccurateRip and CUETools databases.
+	Long: `Verify audio files against the AccurateRip and CUETools databases.
 
-Requires a CUE file to determine track layout. Computes CRCs and compares against
-database entries to verify rip accuracy.
+The path can be:
+  - A CUE file (.cue) - parses track layout from CUE sheet
+  - A directory - auto-discovers audio files and optional CUE sheet
 
-For split-track CUE files (multiple FILE directives), the audio file argument is optional
-as the audio paths are embedded in the CUE sheet.`,
-	Args: cobra.MaximumNArgs(1),
+By default, queries both AccurateRip and CTDB with parity-based error detection.
+Use --no-ar, --no-ctdb, or --no-parity to disable specific features.`,
+	Args: cobra.ExactArgs(1),
 	RunE: runVerify,
 }
 
 // Verify command flags
 var (
-	cuePath       string
-	flagQueryAR   bool
-	flagQueryCTDB bool
+	cuePath       string // deprecated, kept for backward compatibility
+	flagNoAR      bool
+	flagNoCTDB    bool
+	flagNoParity  bool
 	flagVerbose   bool
 	flagDebug     bool
 	stride        int
 	lastStride    int
 	npar          int
-	calcParity    bool
 )
 
 func init() {
-	verifyCmd.Flags().StringVarP(&cuePath, "cue", "c", "", "Path to CUE file (required)")
-	verifyCmd.Flags().BoolVar(&flagQueryAR, "ar", false, "Query AccurateRip database")
-	verifyCmd.Flags().BoolVar(&flagQueryCTDB, "ctdb", false, "Query CTDB database")
+	// Deprecated: --cue flag kept for backward compatibility
+	verifyCmd.Flags().StringVarP(&cuePath, "cue", "c", "", "Path to CUE file (deprecated: use positional argument)")
+	verifyCmd.Flags().MarkDeprecated("cue", "use positional argument instead")
+
+	// Feature disable flags (features are enabled by default)
+	verifyCmd.Flags().BoolVar(&flagNoAR, "no-ar", false, "Disable AccurateRip database query")
+	verifyCmd.Flags().BoolVar(&flagNoCTDB, "no-ctdb", false, "Disable CTDB database query")
+	verifyCmd.Flags().BoolVar(&flagNoParity, "no-parity", false, "Disable parity/syndrome calculation")
+
+	// Output options
 	verifyCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Verbose output")
 	verifyCmd.Flags().BoolVar(&flagDebug, "debug", false, "Debug output (dump CRC state for comparison with CueTools)")
+
+	// Advanced parity options
 	verifyCmd.Flags().IntVar(&stride, "stride", 588*10*2, "Parity stride in samples")
 	verifyCmd.Flags().IntVar(&lastStride, "last-stride", 588*10*2, "Last stride in samples (defaults to stride)")
 	verifyCmd.Flags().IntVar(&npar, "npar", 8, "Number of parity symbols")
-	verifyCmd.Flags().BoolVar(&calcParity, "parity", false, "Calculate parity/syndrome")
-
-	verifyCmd.MarkFlagRequired("cue")
 
 	rootCmd.AddCommand(verifyCmd)
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
-	var audioPath string
-	if len(args) > 0 {
-		audioPath = args[0]
-		// Check audio file exists
-		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
-			return fmt.Errorf("audio file not found: %s", audioPath)
-		}
+	// Check required dependencies first
+	if err := ingest.CheckDependencies(); err != nil {
+		return err
 	}
 
-	// Check CUE file exists
-	if _, err := os.Stat(cuePath); os.IsNotExist(err) {
-		return fmt.Errorf("CUE file not found: %s", cuePath)
+	inputPath := args[0]
+
+	// Check input path exists
+	info, err := os.Stat(inputPath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("path not found: %s", inputPath)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+
+	// Determine input type and set paths accordingly
+	var cueFile string
+	var dirPath string
+
+	if info.IsDir() {
+		// Directory mode: will auto-discover files
+		dirPath = inputPath
+	} else if strings.HasSuffix(strings.ToLower(inputPath), ".cue") {
+		// CUE file mode
+		cueFile = inputPath
+	} else {
+		return fmt.Errorf("path must be a CUE file (.cue) or directory: %s", inputPath)
+	}
+
+	// Handle deprecated --cue flag (backward compatibility)
+	if cuePath != "" && cueFile == "" {
+		cueFile = cuePath
 	}
 
 	// Use -1 as sentinel for "auto-compute" if not explicitly set
@@ -93,14 +124,14 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	}()
 
 	opts := VerifyOptions{
-		AudioPath:  audioPath,
-		CuePath:    cuePath,
+		CuePath:    cueFile,
+		DirPath:    dirPath,
 		Stride:     stride,
 		LastStride: lastStride,
 		Npar:       npar,
-		CalcParity: calcParity,
-		QueryAR:    flagQueryAR,
-		QueryCTDB:  flagQueryCTDB,
+		CalcParity: !flagNoParity,
+		QueryAR:    !flagNoAR,
+		QueryCTDB:  !flagNoCTDB,
 		Verbose:    flagVerbose,
 		Debug:      flagDebug,
 	}
@@ -108,7 +139,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	return Verify(ctx, opts)
 }
 
-// Execute is the entry point for the ctdbtool CLI.
+// Execute is the entry point for the ctdbtools CLI.
 func Execute() error {
 	return rootCmd.Execute()
 }

@@ -1,7 +1,7 @@
 package accuraterip
 
 import (
-	"ctdbtool/internal/parity"
+	"ctdbtools/internal/parity"
 )
 
 // ParityState holds parity buffers and encode tables for stride-based parity generation.

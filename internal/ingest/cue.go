@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +10,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/toc"
+
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 var timeRe = regexp.MustCompile(`(\d+):(\d+):(\d+)`)
@@ -350,22 +358,166 @@ func ParseCueSheet(lines []string, cueDir string) (CueSheet, error) {
 }
 
 // ParseCueSheetFile reads a CUE file and parses it with split track support.
+// Automatically detects and converts non-UTF-8 encodings (Windows-1252, Shift-JIS, GBK, UTF-16).
 func ParseCueSheetFile(path string) (CueSheet, error) {
-	f, err := os.Open(filepath.Clean(path))
+	// Read raw content first to check encoding
+	content, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return CueSheet{}, err
+		return CueSheet{}, fmt.Errorf("cannot read CUE file: %w", err)
 	}
-	defer f.Close()
 
-	var lines []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
+	if len(content) == 0 {
+		return CueSheet{}, fmt.Errorf("CUE file is empty: %s", path)
 	}
-	if err := sc.Err(); err != nil && err != io.EOF {
-		return CueSheet{}, err
+
+	// Detect encoding and convert to UTF-8
+	text, encodingErr := detectAndConvertEncoding(content)
+	if encodingErr != nil {
+		return CueSheet{}, fmt.Errorf("failed to decode CUE file encoding: %w", encodingErr)
+	}
+
+	lines := strings.Split(text, "\n")
+	// Trim \r from Windows line endings
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+
+	// Basic validation: check if it looks like a CUE file
+	if !looksLikeCueFile(lines) {
+		return CueSheet{}, fmt.Errorf("file does not appear to be a valid CUE sheet: %s", path)
 	}
 
 	cueDir := filepath.Dir(path)
 	return ParseCueSheet(lines, cueDir)
+}
+
+// detectAndConvertEncoding detects the encoding of content and converts it to UTF-8.
+// Detection order: UTF-8 BOM, UTF-16 LE/BE BOM, valid UTF-8, then tries common codepages.
+func detectAndConvertEncoding(content []byte) (string, error) {
+	// Check for UTF-8 BOM
+	if bytes.HasPrefix(content, []byte{0xEF, 0xBB, 0xBF}) {
+		return string(content[3:]), nil
+	}
+
+	// Check for UTF-16 LE BOM (0xFF 0xFE)
+	if len(content) >= 2 && content[0] == 0xFF && content[1] == 0xFE {
+		decoder := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
+		result, _, err := transform.Bytes(decoder, content)
+		if err != nil {
+			return "", fmt.Errorf("UTF-16 LE decoding failed: %w", err)
+		}
+		return string(result), nil
+	}
+
+	// Check for UTF-16 BE BOM (0xFE 0xFF)
+	if len(content) >= 2 && content[0] == 0xFE && content[1] == 0xFF {
+		decoder := unicode.UTF16(unicode.BigEndian, unicode.UseBOM).NewDecoder()
+		result, _, err := transform.Bytes(decoder, content)
+		if err != nil {
+			return "", fmt.Errorf("UTF-16 BE decoding failed: %w", err)
+		}
+		return string(result), nil
+	}
+
+	// Check if it's valid UTF-8 (no BOM)
+	if utf8.Valid(content) {
+		return string(content), nil
+	}
+
+	// Try common codepages in order of likelihood
+	// Windows-1252 (Western European) - most common for Western CUE files
+	if decoded, ok := tryDecode(content, charmap.Windows1252.NewDecoder()); ok {
+		if looksLikeCueContent(decoded) {
+			return decoded, nil
+		}
+	}
+
+	// Shift-JIS (Japanese)
+	if decoded, ok := tryDecode(content, japanese.ShiftJIS.NewDecoder()); ok {
+		if looksLikeCueContent(decoded) {
+			return decoded, nil
+		}
+	}
+
+	// GBK (Simplified Chinese)
+	if decoded, ok := tryDecode(content, simplifiedchinese.GBK.NewDecoder()); ok {
+		if looksLikeCueContent(decoded) {
+			return decoded, nil
+		}
+	}
+
+	// ISO-8859-1 (Latin-1) - fallback for Western European
+	if decoded, ok := tryDecode(content, charmap.ISO8859_1.NewDecoder()); ok {
+		if looksLikeCueContent(decoded) {
+			return decoded, nil
+		}
+	}
+
+	// If nothing works, try to use the content as-is (may have some invalid chars)
+	// This allows processing CUE files with minor encoding issues
+	return string(content), nil
+}
+
+// tryDecode attempts to decode content using the given decoder.
+// Returns the decoded string and true if successful.
+func tryDecode(content []byte, decoder transform.Transformer) (string, bool) {
+	result, _, err := transform.Bytes(decoder, content)
+	if err != nil {
+		return "", false
+	}
+	// Check if result is valid UTF-8
+	if !utf8.Valid(result) {
+		return "", false
+	}
+	return string(result), true
+}
+
+// looksLikeCueContent checks if the decoded content looks like valid CUE file content.
+// This helps verify that the encoding detection was correct.
+func looksLikeCueContent(content string) bool {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		upperLine := strings.ToUpper(line)
+		// Look for CUE keywords
+		if strings.HasPrefix(upperLine, "FILE ") ||
+			strings.HasPrefix(upperLine, "TRACK ") ||
+			strings.HasPrefix(upperLine, "INDEX ") ||
+			strings.HasPrefix(upperLine, "PERFORMER ") ||
+			strings.HasPrefix(upperLine, "TITLE ") ||
+			strings.HasPrefix(upperLine, "REM ") {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeCueFile checks if the content looks like a valid CUE sheet
+func looksLikeCueFile(lines []string) bool {
+	hasTrack := false
+	hasIndex := false
+	hasFile := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		upperLine := strings.ToUpper(line)
+
+		if strings.HasPrefix(upperLine, "TRACK ") {
+			hasTrack = true
+		}
+		if strings.HasPrefix(upperLine, "INDEX ") {
+			hasIndex = true
+		}
+		if strings.HasPrefix(upperLine, "FILE ") {
+			hasFile = true
+		}
+
+		// If we found all markers, it's likely a CUE file
+		if hasTrack && hasIndex {
+			return true
+		}
+	}
+
+	// Must have at least TRACK or FILE directive
+	return hasTrack || hasFile
 }

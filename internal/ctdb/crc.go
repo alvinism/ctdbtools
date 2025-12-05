@@ -3,8 +3,8 @@ package ctdb
 import (
 	"errors"
 
-	"ctdbtool/internal/accuraterip"
-	"ctdbtool/internal/hashes"
+	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/hashes"
 )
 
 // CRCComputer computes CTDB CRCs over track windows with offset/prefix/suffix trimming.

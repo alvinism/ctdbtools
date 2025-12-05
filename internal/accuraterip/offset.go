@@ -1,6 +1,6 @@
 package accuraterip
 
-import "ctdbtool/internal/hashes"
+import "ctdbtools/internal/hashes"
 
 // TrackWindow represents a track with optional leading/trailing neighbor samples.
 // Prefix/Suffix should contain up to maxOffset samples from adjacent tracks to allow offset windows.

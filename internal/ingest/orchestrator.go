@@ -6,8 +6,8 @@ import (
 	"io"
 	"path/filepath"
 
-	"ctdbtool/internal/accuraterip"
-	"ctdbtool/internal/toc"
+	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/toc"
 )
 
 // ProcessFile decodes an audio file via ffmpeg and feeds PCM into the AccurateRip processor.
