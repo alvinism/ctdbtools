@@ -7,6 +7,7 @@ import (
 	"ctdbtool/internal/accuraterip"
 	"ctdbtool/internal/ingest"
 	"ctdbtool/internal/network"
+	"ctdbtool/internal/parity"
 	"ctdbtool/internal/toc"
 )
 
@@ -311,6 +312,14 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	trackMatches := make([]int, layout.AudioTracks)
 	totalConfidence := 0
 
+	// Track error detection info from parity: "differs in X samples @position"
+	type errorInfo struct {
+		confidence int
+		errorCount int
+		positions  string // formatted as MM:SS:FF-MM:SS:FF
+	}
+	discErrorInfo := errorInfo{} // Disc-level error info (errors may span tracks)
+
 	// Compute layout parameters for laststride calculation.
 	// finalSampleCount = total audio samples (stereo, 32-bit each)
 	// pregap = pregap of first track in samples
@@ -353,13 +362,49 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 
 		// Compare track CRCs at the found offset
+		allTracksMatch := true
 		for track := 1; track <= layout.AudioTracks; track++ {
 			localCRC := proc.TrackCTDBCRC(track, offset, stride, laststride)
 			if localCRC == entry.TrackCRCs[track-1] {
 				trackMatches[track-1] += entry.Confidence
+			} else {
+				allTracksMatch = false
 			}
 		}
 		totalConfidence += entry.Confidence
+
+		// For entries with parity where tracks don't match exactly, try to detect correctable errors
+		// This allows us to report "differs in X samples @position" for repairable errors
+		// Skip this check if all tracks already match (no errors to detect)
+		if entry.HasParity != "" && proc.Parity() != nil && !allTracksMatch {
+			// Fetch full parity data from CTDB
+			ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
+			if err == nil && ctdbSyndrome != nil {
+				// Get local syndrome at offset 0 (CTDB parity is always at offset 0)
+				localSyn := proc.Parity().SyndromeWithOffset(0, len(ctdbSyndrome))
+				if localSyn != nil {
+					xorSyn := parity.XORSyndromes(localSyn, ctdbSyndrome)
+					if !parity.IsZeroSyndrome(xorSyn) {
+						// Syndromes differ - try to detect errors using Reed-Solomon
+						strideCount := (finalSampleCount * 2) / stride
+						rs := parity.NewRsDecode(entry.Npar)
+						errCount, errPositions := rs.DetectErrors(localSyn, ctdbSyndrome, stride, strideCount)
+
+						if errCount > 0 && errPositions != nil {
+							// Format error positions as MM:SS:FF ranges
+							posStr := parity.FormatAffectedSectors(errPositions)
+
+							// Store error info - accumulate confidence for "differs" entries
+							discErrorInfo.confidence += entry.Confidence
+							if discErrorInfo.errorCount == 0 {
+								discErrorInfo.errorCount = errCount
+								discErrorInfo.positions = posStr
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Check disc CRC against entries (for overall disc match status)
@@ -393,6 +438,12 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			status = "No entries to compare"
 		}
 		fmt.Printf(" %2d   | %s\n", track, status)
+	}
+
+	// Display error info if detected via parity (shown separately since it's disc-level)
+	if discErrorInfo.errorCount > 0 {
+		fmt.Printf("      | or (%d/%d) differs in %d samples @%s\n",
+			discErrorInfo.confidence, totalConfidence, discErrorInfo.errorCount, discErrorInfo.positions)
 	}
 
 	if discMatched {
