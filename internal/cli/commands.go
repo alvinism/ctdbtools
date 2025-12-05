@@ -207,6 +207,10 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	return nil
 }
 
+// AccurateRip offset search range: ±(5*588-1) = ±2939 samples
+// This matches CueTools _arOffsetRange constant.
+const arOffsetRange = 5*588 - 1
+
 // queryAccurateRip queries the AccurateRip database and displays results.
 func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, verbose bool) error {
 	arID, err := layout.AccurateRipID()
@@ -233,32 +237,113 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 	// Compare our CRCs against database for each track
 	// AccurateRip database stores either v1 or v2 CRC in the CRC field
 	// We need to compare both our v1 and v2 against the database CRC
+	// CueTools searches ±2939 samples for v1 matches, v2 only at offset 0
 	fmt.Println("Track   [  CRC   |   V2   ] Status")
 	for track := 1; track <= layout.AudioTracks; track++ {
-		localAR := proc.TrackCRCAR(track)
 		localV2 := proc.TrackCRCV2(track)
 
 		// Check all pressings for a match
-		// matchCount = matches on v1, v2MatchCount = matches on v2
+		// matchCount = matches on v1 (any offset), v2MatchCount = matches on v2 (offset 0 only)
 		var matchCount, v2MatchCount, totalCount int
 		for _, disk := range resp.Disks {
 			if track-1 < len(disk.Tracks) {
 				dbTrack := disk.Tracks[track-1]
 				totalCount += int(dbTrack.Count)
-				// Compare both v1 and v2 against database CRC
-				if dbTrack.CRC == localAR {
-					matchCount += int(dbTrack.Count)
-				} else if dbTrack.CRC == localV2 {
+
+				// Try V2 at offset 0 first (faster check)
+				if dbTrack.CRC == localV2 {
 					v2MatchCount += int(dbTrack.Count)
+					continue
+				}
+
+				// Search all offsets for V1 match (CueTools behavior)
+				// Check offset 0 first, then search ±arOffsetRange
+				localAR0 := proc.TrackCRCARWithOffset(track, 0)
+				if dbTrack.CRC == localAR0 {
+					matchCount += int(dbTrack.Count)
+					continue
+				}
+
+				// Full offset search
+				matched := false
+				for oi := -arOffsetRange; oi <= arOffsetRange && !matched; oi++ {
+					if oi == 0 {
+						continue // Already checked
+					}
+					localAR := proc.TrackCRCARWithOffset(track, oi)
+					if dbTrack.CRC == localAR {
+						matchCount += int(dbTrack.Count)
+						matched = true
+					}
 				}
 			}
 		}
 
+		// Display local CRC at offset 0 for reference
+		localAR := proc.TrackCRCAR(track)
 		status := "No match"
 		if matchCount > 0 || v2MatchCount > 0 {
 			status = fmt.Sprintf("(%02d+%02d/%d) Accurately ripped", matchCount, v2MatchCount, totalCount)
 		}
 		fmt.Printf(" %02d     [%08x|%08x] %s\n", track, localAR, localV2, status)
+	}
+
+	// Search for matching offsets across all tracks (CueTools verbose mode behavior)
+	// This shows "Offsetted by X:" for each offset where ALL tracks match
+	offsetsFound := 0
+	const maxOffsetsToShow = 16
+
+	for oi := -arOffsetRange; oi <= arOffsetRange; oi++ {
+		if oi == 0 {
+			continue // Already shown in main results
+		}
+
+		// Check if ALL tracks match at this offset
+		allTracksMatch := true
+		trackResults := make([]struct {
+			crc   uint32
+			conf  int
+			total int
+		}, layout.AudioTracks)
+
+		for track := 1; track <= layout.AudioTracks; track++ {
+			localAR := proc.TrackCRCARWithOffset(track, oi)
+			trackResults[track-1].crc = localAR
+
+			// Check against all pressings
+			matched := false
+			for _, disk := range resp.Disks {
+				if track-1 < len(disk.Tracks) {
+					dbTrack := disk.Tracks[track-1]
+					trackResults[track-1].total += int(dbTrack.Count)
+					if dbTrack.CRC == localAR && dbTrack.CRC != 0 {
+						trackResults[track-1].conf += int(dbTrack.Count)
+						matched = true
+					}
+				}
+			}
+			if !matched {
+				allTracksMatch = false
+			}
+		}
+
+		if allTracksMatch {
+			offsetsFound++
+			if offsetsFound > maxOffsetsToShow {
+				fmt.Println("More than 16 offsets match!")
+				break
+			}
+
+			fmt.Printf("\nOffseted by %d:\n", oi)
+			for track := 1; track <= layout.AudioTracks; track++ {
+				tr := trackResults[track-1]
+				status := "Accurately ripped"
+				if tr.conf == 0 {
+					status = "No match"
+				}
+				fmt.Printf(" %02d     [%08x] (%02d/%d) %s\n", track, tr.crc, tr.conf, tr.total, status)
+			}
+		}
 	}
 
 	// Show pressing details in verbose mode
@@ -274,17 +359,37 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 	return nil
 }
 
+// trackErrorInfo stores per-track error information from parity verification.
+type trackErrorInfo struct {
+	confidence int
+	errorCount int
+	positions  string // formatted as MM:SS:FF-MM:SS:FF
+}
+
+// getTrackSampleRange returns the sample range [min, max) for a track in 16-bit samples.
+// This matches CueTools convention where positions are relative to first audio track start.
+func getTrackSampleRange(layout toc.Layout, track int) (min, max int) {
+	firstTrackStart := layout.TrackStartFrame(1)
+	trackStart := layout.TrackStartFrame(track)
+	trackEnd := trackStart + layout.TrackLengthFrames(track)
+
+	// Convert frames to 16-bit samples (1 frame = 588 stereo = 1176 16-bit)
+	// CueTools uses: (tri.Start - tr0.Start) * 588 and (tri.End + 1 - tr0.Start) * 588
+	// where values are in stereo samples, but parity uses 16-bit samples (* 2)
+	min = (trackStart - firstTrackStart) * 588 * 2
+	max = (trackEnd - firstTrackStart) * 588 * 2
+	return min, max
+}
+
 // queryCTDB queries the CUETools Database and displays results.
 //
-// CTDB Verification Algorithm:
-// 1. Query CTDB server with TOC string to get entries (each with disc CRC, track CRCs, stride)
-// 2. For each entry, search for the matching drive offset by comparing disc CRC
-// 3. Once offset is found, compare track CRCs at that offset
-// 4. Aggregate matches across all entries weighted by confidence
-//
-// CTDB is "offset-independent" - different CD drives have different read offsets,
-// but CTDB can verify rips regardless of offset by searching for a matching offset.
-// See docs/CTDB_ALGORITHM.md for detailed algorithm explanation.
+// CTDB Verification Algorithm (matches CueTools CUEToolsDB.cs):
+// 1. Query CTDB server with TOC string to get entries
+// 2. For each entry, try 3-case confidence matching:
+//    a) Case 1: Exact CRC match (!hasErrors) - add full confidence
+//    b) Case 2: Recoverable entry (canRecover) - check per-track error boundaries
+//    c) Case 3: No parity, has trackcrcs - search offsets for per-track CRC match
+// 3. Aggregate matches and display per-track status with "differs" info
 func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, verbose bool) error {
 	tocStr := layout.TOCString()
 	fmt.Printf("\nCTDB TOC: %s\n", tocStr)
@@ -308,28 +413,19 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 
 	fmt.Printf("CTDB: Found %d entries (total confidence: %d)\n", len(resp.Entries), resp.Total)
 
-	// Aggregate per-track match counts across all entries
-	trackMatches := make([]int, layout.AudioTracks)
+	// Per-track confidence tracking
+	trackMatches := make([]int, layout.AudioTracks)     // Exact matches
+	trackErrorInfos := make([]trackErrorInfo, layout.AudioTracks) // "differs" info per track
 	totalConfidence := 0
 
-	// Track error detection info from parity: "differs in X samples @position"
-	type errorInfo struct {
-		confidence int
-		errorCount int
-		positions  string // formatted as MM:SS:FF-MM:SS:FF
-	}
-	discErrorInfo := errorInfo{} // Disc-level error info (errors may span tracks)
-
-	// Compute layout parameters for laststride calculation.
-	// finalSampleCount = total audio samples (stereo, 32-bit each)
-	// pregap = pregap of first track in samples
+	// Compute layout parameters
 	finalSampleCount := layout.AudioLengthFrames() * 588
 	pregap := 0
 	if len(layout.Tracks) > 0 {
 		pregap = layout.Tracks[0].Pregap * 588
 	}
 
-	// Track the best match info for displaying detected offset
+	// Track best match for displaying detected offset
 	var bestOffset int
 	var bestConfidence int
 
@@ -338,22 +434,13 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			continue // skip entries with wrong track count
 		}
 
-		// CTDB entry.Stride is already doubled by the parser (CTDB XML returns stride/2)
 		stride := entry.Stride
-
-		// Compute laststride using CueTools formula (CDRepair.cs:29):
-		//   laststride = stride + ((finalSampleCount - pregap) * 2) % stride
-		// This ensures the total verified data length is a multiple of stride.
-		// The "* 2" converts stereo samples to 16-bit channel samples.
 		laststride := stride + ((finalSampleCount-pregap)*2)%stride
 
-		// CTDB is offset-independent: search for matching offset by comparing disc CRC.
-		// Different CD drives have different read offsets (e.g., +667, -30, etc.).
-		// We search offsets from -(stride/2)+1 to (stride/2)-1 to find where our
-		// computed disc CRC matches the CTDB entry's expected CRC.
+		// Find matching offset by disc CRC
 		offset := findCTDBOffsetByCRC(proc, entry.CRC32, stride, laststride)
 
-		// Track best match for displaying detected offset
+		// Track best match for display
 		if offset != 0 || entry.Confidence > bestConfidence {
 			if proc.DiscCTDBCRC(offset, stride, laststride) == entry.CRC32 {
 				bestOffset = offset
@@ -361,53 +448,141 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			}
 		}
 
-		// Compare track CRCs at the found offset
+		totalConfidence += entry.Confidence
+
+		// Process entry based on available data
+		// Priority: 1. Parity-based verification, 2. CRC matching, 3. Offset search
+
+		entryProcessed := false
+
+		// Try parity-based verification first (most accurate)
+		if entry.HasParity != "" && proc.Parity() != nil {
+			ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
+			if err == nil && ctdbSyndrome != nil {
+				// Get local syndrome (CTDB syndrome is stored at reference offset)
+				// We need to find the offset where syndromes align
+				localSyn := proc.Parity().SyndromeWithOffset(-offset, len(ctdbSyndrome))
+				if localSyn != nil {
+					xorSyn := parity.XORSyndromes(localSyn, ctdbSyndrome)
+
+					if parity.IsZeroSyndrome(xorSyn) {
+						// Perfect syndrome match - add confidence to all tracks
+						if verbose {
+							fmt.Printf("  DEBUG CTDB Entry (conf=%d): Perfect syndrome match (parity)\n", entry.Confidence)
+						}
+						for track := 0; track < layout.AudioTracks; track++ {
+							trackMatches[track] += entry.Confidence
+						}
+						entryProcessed = true
+					} else {
+						// Syndromes differ - try to detect/locate errors
+						// CueTools stridecount formula (CDRepair.cs:30):
+						// stridecount = ((finalSampleCount - pregap) * 2) / stride - 2
+						// The -2 accounts for leadin and leadout strides excluded from RS codeword
+						strideCount := ((finalSampleCount - pregap) * 2) / stride - 2
+						pregap16bit := pregap * 2 // Convert stereo samples to 16-bit samples
+
+						rs := parity.NewRsDecode(entry.Npar)
+						errCount, errPositions := rs.DetectErrorsWithOffset(
+							localSyn, ctdbSyndrome, stride, strideCount, pregap16bit, offset)
+
+						if verbose {
+							fmt.Printf("  DEBUG CTDB Entry (conf=%d): RS detection result: errCount=%d, positions=%v\n",
+								entry.Confidence, errCount, errPositions)
+						}
+
+						if errCount > 0 && errPositions != nil {
+							// Entry is recoverable - check per-track error boundaries
+							// CueTools: if diffCount == 0 in a track, add confidence for that track
+							for track := 1; track <= layout.AudioTracks; track++ {
+								trackMin, trackMax := getTrackSampleRange(layout, track)
+								// Use bounded count matching CueTools CDRepairFix.GetAffectedSectorsCount
+								errorsInTrack := parity.GetAffectedSectorsCountWithBounds(
+									errPositions, trackMin, trackMax,
+									pregap16bit, stride, laststride, finalSampleCount, offset)
+
+								if errorsInTrack == 0 {
+									// No errors in THIS track - add confidence
+									trackMatches[track-1] += entry.Confidence
+								} else {
+									// Track has errors - store "differs" info
+									// Use default coalesce = 2 * 588 * 5 = 5880
+									posStr := parity.FormatAffectedSectorsFiltered(errPositions, trackMin, trackMax, trackMin, 5880)
+									if trackErrorInfos[track-1].errorCount == 0 {
+										trackErrorInfos[track-1] = trackErrorInfo{
+											confidence: entry.Confidence,
+											errorCount: errorsInTrack,
+											positions:  posStr,
+										}
+									} else {
+										// Accumulate confidence for multiple "differs" entries
+										trackErrorInfos[track-1].confidence += entry.Confidence
+									}
+								}
+							}
+							entryProcessed = true
+						}
+						// If error detection failed, fall through to CRC-based matching
+					}
+				}
+			}
+		}
+
+		if entryProcessed {
+			continue
+		}
+
+		// Check CRC matching at found offset
+		trackCRCMatches := make([]bool, layout.AudioTracks)
 		allTracksMatch := true
 		for track := 1; track <= layout.AudioTracks; track++ {
 			localCRC := proc.TrackCTDBCRC(track, offset, stride, laststride)
 			if localCRC == entry.TrackCRCs[track-1] {
-				trackMatches[track-1] += entry.Confidence
+				trackCRCMatches[track-1] = true
 			} else {
 				allTracksMatch = false
 			}
 		}
-		totalConfidence += entry.Confidence
 
-		// For entries with parity where tracks don't match exactly, try to detect correctable errors
-		// This allows us to report "differs in X samples @position" for repairable errors
-		// Skip this check if all tracks already match (no errors to detect)
-		if entry.HasParity != "" && proc.Parity() != nil && !allTracksMatch {
-			// Fetch full parity data from CTDB
-			ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
-			if err == nil && ctdbSyndrome != nil {
-				// Get local syndrome at offset 0 (CTDB parity is always at offset 0)
-				localSyn := proc.Parity().SyndromeWithOffset(0, len(ctdbSyndrome))
-				if localSyn != nil {
-					xorSyn := parity.XORSyndromes(localSyn, ctdbSyndrome)
-					if !parity.IsZeroSyndrome(xorSyn) {
-						// Syndromes differ - try to detect errors using Reed-Solomon
-						strideCount := (finalSampleCount * 2) / stride
-						rs := parity.NewRsDecode(entry.Npar)
-						errCount, errPositions := rs.DetectErrors(localSyn, ctdbSyndrome, stride, strideCount)
+		if allTracksMatch {
+			// All tracks match exactly - add confidence to all tracks
+			for track := 0; track < layout.AudioTracks; track++ {
+				trackMatches[track] += entry.Confidence
+			}
+			continue
+		}
 
-						if errCount > 0 && errPositions != nil {
-							// Format error positions as MM:SS:FF ranges
-							posStr := parity.FormatAffectedSectors(errPositions)
+		// CRC-based offset search for entries without parity
+		// CueTools: for entries without parity but with trackcrcs, search ±arOffsetRange
+		if entry.TrackCRCs != nil {
+			for track := 1; track <= layout.AudioTracks; track++ {
+				if trackCRCMatches[track-1] {
+					// Already matched at detected offset
+					trackMatches[track-1] += entry.Confidence
+					continue
+				}
 
-							// Store error info - accumulate confidence for "differs" entries
-							discErrorInfo.confidence += entry.Confidence
-							if discErrorInfo.errorCount == 0 {
-								discErrorInfo.errorCount = errCount
-								discErrorInfo.positions = posStr
-							}
-						}
+				// Try at detected offset first (with negation like CueTools)
+				localCRC := proc.TrackCTDBCRC(track, -offset, stride, laststride)
+				if localCRC == entry.TrackCRCs[track-1] {
+					trackMatches[track-1] += entry.Confidence
+					continue
+				}
+
+				// Search ±arOffsetRange for match
+				matched := false
+				for oi := -arOffsetRange; oi <= arOffsetRange && !matched; oi++ {
+					localCRC := proc.TrackCTDBCRC(track, oi, stride, laststride)
+					if localCRC == entry.TrackCRCs[track-1] {
+						trackMatches[track-1] += entry.Confidence
+						matched = true
 					}
 				}
 			}
 		}
 	}
 
-	// Check disc CRC against entries (for overall disc match status)
+	// Check disc CRC match status
 	discMatched := false
 	for _, entry := range resp.Entries {
 		if len(entry.TrackCRCs) != layout.AudioTracks {
@@ -415,35 +590,37 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 		stride := entry.Stride
 		laststride := stride + ((finalSampleCount-pregap)*2)%stride
-
 		offset := findCTDBOffsetByCRC(proc, entry.CRC32, stride, laststride)
-
-		localDiscCRC := proc.DiscCTDBCRC(offset, stride, laststride)
-		if localDiscCRC == entry.CRC32 {
+		if proc.DiscCTDBCRC(offset, stride, laststride) == entry.CRC32 {
 			discMatched = true
 			break
 		}
 	}
 
-	// Display per-track CTDB verification status
+	// Display per-track CTDB verification status (CueTools format)
 	fmt.Println("Track | CTDB Status")
 	for track := 1; track <= layout.AudioTracks; track++ {
 		matches := trackMatches[track-1]
+		errInfo := trackErrorInfos[track-1]
+
 		var status string
 		if matches > 0 {
 			status = fmt.Sprintf("(%d/%d) Accurately ripped", matches, totalConfidence)
+			// Also show "differs" info if present for this track
+			if errInfo.errorCount > 0 {
+				status += fmt.Sprintf(", or (%d/%d) differs in %d samples @%s",
+					errInfo.confidence, totalConfidence, errInfo.errorCount, errInfo.positions)
+			}
+		} else if errInfo.errorCount > 0 {
+			// Only "differs" status
+			status = fmt.Sprintf("(%d/%d) Differs in %d samples @%s",
+				errInfo.confidence, totalConfidence, errInfo.errorCount, errInfo.positions)
 		} else if totalConfidence > 0 {
 			status = fmt.Sprintf("(0/%d) No match", totalConfidence)
 		} else {
 			status = "No entries to compare"
 		}
 		fmt.Printf(" %2d   | %s\n", track, status)
-	}
-
-	// Display error info if detected via parity (shown separately since it's disc-level)
-	if discErrorInfo.errorCount > 0 {
-		fmt.Printf("      | or (%d/%d) differs in %d samples @%s\n",
-			discErrorInfo.confidence, totalConfidence, discErrorInfo.errorCount, discErrorInfo.positions)
 	}
 
 	if discMatched {

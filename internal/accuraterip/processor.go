@@ -134,6 +134,14 @@ func (p *Processor) TrackCRCAR(track int) uint32 {
 	return p.rolling.CRCARWithOffset(track-1, 0, &p.layout)
 }
 
+// TrackCRCARWithOffset returns the AccurateRip v1 CRC for a specific track at given offset.
+// track is 1-based audio track number, oi is offset in samples.
+// This allows searching for matches at different drive offsets (typically ±2939 samples).
+func (p *Processor) TrackCRCARWithOffset(track, oi int) uint32 {
+	// Convert to 0-based index for CRCARWithOffset
+	return p.rolling.CRCARWithOffset(track-1, oi, &p.layout)
+}
+
 // TrackCRCV2 returns the AccurateRip v2 CRC for a specific track.
 // track is 1-based audio track number.
 func (p *Processor) TrackCRCV2(track int) uint32 {
