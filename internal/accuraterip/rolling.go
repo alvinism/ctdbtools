@@ -116,12 +116,16 @@ func (rt *RollingTables) FeedSamples(trackIndex int, samplesPerTrackPosition int
 		// Determine cache offset following CueTools logic:
 		// - Head: samplesDoneTrack < maxOffset -> offset = samplesDoneTrack
 		// - Tail: samplesRemTrack <= maxOffset -> offset = 2*maxOffset - samplesRemTrack
+		// - Frame450 region: samplesDoneTrack in [445*588, 455*588] -> offset = 2*maxOffset + 1 + (samplesDoneTrack - 445*588)
 		// - Otherwise: -1 (don't cache)
 		offset := -1
 		if posInTrack < rt.MaxOffset {
 			offset = posInTrack
 		} else if samplesRemaining <= rt.MaxOffset {
 			offset = 2*rt.MaxOffset - samplesRemaining
+		} else if posInTrack >= 445*588 && posInTrack <= 455*588 {
+			// Frame450 region for partial offset matching (CueTools AccurateRip.cs:622)
+			offset = 2*rt.MaxOffset + 1 + posInTrack - 445*588
 		}
 
 		// Cache values at computed offset
@@ -388,6 +392,38 @@ func (rt *RollingTables) CRCV2WithOffset(iTrack int, toc *toc.Layout) uint32 {
 	}
 
 	return crcA1 + crcA2
+}
+
+// CRC450WithOffset calculates AccurateRip Frame450 CRC for partial offset matching.
+// This mirrors CueTools AccurateRipVerify.CRC450(iTrack, oi).
+// iTrack is 0-based (0 = first audio track), oi is the offset.
+//
+// Frame450 CRC is computed for frames 5-6 of each track at a fixed position multiplier
+// of 450*588. This provides a fingerprint for offset detection when the full track
+// CRC doesn't match due to offset differences.
+func (rt *RollingTables) CRC450WithOffset(iTrack int, oi int, toc *toc.Layout) uint32 {
+	// CueTools uses 1-based index in arrays
+	track := iTrack + 1
+
+	// Frame 5 and 6 positions (5*588 and 6*588 samples into track)
+	// With offset: position = 2*maxOffset + 1 + frame*588 + oi
+	posA := 2*rt.MaxOffset + 1 + 5*588 + oi
+	posB := 2*rt.MaxOffset + 1 + 6*588 + oi
+
+	// Bounds check
+	if posA < 0 || posA >= len(rt.CRCAR[track]) || posB < 0 || posB >= len(rt.CRCAR[track]) {
+		return 0
+	}
+
+	crca := rt.CRCAR[track][posA]
+	crcb := rt.CRCAR[track][posB]
+	suma := rt.CRCSM[track][posA]
+	sumb := rt.CRCSM[track][posB]
+
+	// Position offset for AR calculation: 450*588 + oi
+	offs := uint32(450*588 + oi)
+
+	return crcb - crca - offs*(sumb-suma)
 }
 
 // CTDBCRCWithOffset computes CTDB-style CRC for a track with prefix/suffix skipping.

@@ -324,9 +324,10 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 	}
 
 	// Search for matching offsets across all tracks (CueTools verbose mode behavior)
-	// This shows "Offsetted by X:" for each offset where ALL tracks match
+	// First pass: Show "Offsetted by X:" for each offset where ALL tracks match
 	offsetsFound := 0
 	const maxOffsetsToShow = 16
+	shownOffsets := make(map[int]bool)
 
 	for oi := -arOffsetRange; oi <= arOffsetRange; oi++ {
 		if oi == 0 {
@@ -364,12 +365,13 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 
 		if allTracksMatch {
 			offsetsFound++
+			shownOffsets[oi] = true
 			if offsetsFound > maxOffsetsToShow {
 				fmt.Println("More than 16 offsets match!")
 				break
 			}
 
-			fmt.Printf("\nOffseted by %d:\n", oi)
+			fmt.Printf("Offsetted by %d:\n", oi)
 			for track := 1; track <= layout.AudioTracks; track++ {
 				tr := trackResults[track-1]
 				status := "Accurately ripped"
@@ -377,6 +379,68 @@ func queryAccurateRip(ctx context.Context, layout toc.Layout, proc *accuraterip.
 					status = "No match"
 				}
 				fmt.Printf(" %02d     [%08x] (%02d/%d) %s\n", track, tr.crc, tr.conf, tr.total, status)
+			}
+		}
+	}
+
+	// Second pass: Show offsets with PARTIAL matches (some tracks match or have Frame450 partial matches)
+	// This matches CueTools behavior (line 1086): matches != all && oi != 0 && (matches + partials) != 0
+	for oi := -arOffsetRange; oi <= arOffsetRange; oi++ {
+		if oi == 0 || shownOffsets[oi] {
+			continue // Already shown
+		}
+
+		trackResults := make([]struct {
+			crc   uint32
+			conf  int
+			total int
+		}, layout.AudioTracks)
+
+		matchingTracks := 0
+		partialTracks := 0
+		for track := 1; track <= layout.AudioTracks; track++ {
+			localAR := proc.TrackCRCARWithOffset(track, oi)
+			local450 := proc.TrackCRC450WithOffset(track, oi)
+			trackResults[track-1].crc = localAR
+
+			// Check against all pressings
+			trackMatched := false
+			for _, disk := range resp.Disks {
+				if track-1 < len(disk.Tracks) {
+					dbTrack := disk.Tracks[track-1]
+					trackResults[track-1].total += int(dbTrack.Count)
+					if dbTrack.CRC == localAR && dbTrack.CRC != 0 {
+						trackResults[track-1].conf += int(dbTrack.Count)
+						if !trackMatched {
+							matchingTracks++
+							trackMatched = true
+						}
+					}
+					// Check Frame450 partial match (only count once per track)
+					if !trackMatched && dbTrack.Frame450CRC == local450 && dbTrack.Frame450CRC != 0 {
+						partialTracks++
+						trackMatched = true // Don't count same track twice
+					}
+				}
+			}
+		}
+
+		// Show if SOME tracks match or have partials (but not ALL full matches)
+		if matchingTracks < layout.AudioTracks && (matchingTracks+partialTracks) > 0 {
+			offsetsFound++
+			if offsetsFound > maxOffsetsToShow {
+				fmt.Println("More than 16 offsets match!")
+				break
+			}
+
+			fmt.Printf("Offsetted by %d:\n", oi)
+			for track := 1; track <= layout.AudioTracks; track++ {
+				tr := trackResults[track-1]
+				if tr.conf > 0 {
+					fmt.Printf(" %02d     [%08x] (%02d/%d) Accurately ripped\n", track, tr.crc, tr.conf, tr.total)
+				} else {
+					fmt.Printf(" %02d     [%08x] (%02d/%d) No match (V2 was not tested)\n", track, tr.crc, tr.conf, tr.total)
+				}
 			}
 		}
 	}
@@ -567,6 +631,9 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 
 					// XOR syndromes: if result is all zeros, perfect match
 					xorSyn := parity.XORSyndromes(localSyn, ctdbSyndrome)
+					if xorSyn == nil {
+						return false, -1, nil // Syndromes incompatible
+					}
 					if parity.IsZeroSyndrome(xorSyn) {
 						return true, 0, nil // Perfect match
 					}

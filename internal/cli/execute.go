@@ -64,7 +64,7 @@ func init() {
 	// Advanced parity options
 	verifyCmd.Flags().IntVar(&stride, "stride", 588*10*2, "Parity stride in samples")
 	verifyCmd.Flags().IntVar(&lastStride, "last-stride", 588*10*2, "Last stride in samples (defaults to stride)")
-	verifyCmd.Flags().IntVar(&npar, "npar", 8, "Number of parity symbols")
+	verifyCmd.Flags().IntVar(&npar, "npar", 16, "Number of parity symbols (max 16)")
 
 	rootCmd.AddCommand(verifyCmd)
 }

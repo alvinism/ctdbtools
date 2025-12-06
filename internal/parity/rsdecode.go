@@ -527,17 +527,28 @@ func frameToTimeString(frame int) string {
 }
 
 // XORSyndromes computes the XOR of two syndrome matrices.
+// Handles mismatched lengths by using the minimum of the two lengths.
 func XORSyndromes(a, b [][]uint16) [][]uint16 {
-	if len(a) != len(b) {
+	if a == nil || b == nil {
 		return nil
 	}
-	result := make([][]uint16, len(a))
-	for i := range a {
-		if len(a[i]) != len(b[i]) {
-			return nil
+	// Use minimum length of the two matrices
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	if minLen == 0 {
+		return nil
+	}
+	result := make([][]uint16, minLen)
+	for i := 0; i < minLen; i++ {
+		// Use minimum row length
+		rowLen := len(a[i])
+		if len(b[i]) < rowLen {
+			rowLen = len(b[i])
 		}
-		result[i] = make([]uint16, len(a[i]))
-		for j := range a[i] {
+		result[i] = make([]uint16, rowLen)
+		for j := 0; j < rowLen; j++ {
 			result[i][j] = a[i][j] ^ b[i][j]
 		}
 	}
@@ -545,7 +556,11 @@ func XORSyndromes(a, b [][]uint16) [][]uint16 {
 }
 
 // IsZeroSyndrome checks if a syndrome matrix is all zeros (no errors).
+// Returns true for nil or empty syndromes (conservative: treat as no errors detectable).
 func IsZeroSyndrome(syn [][]uint16) bool {
+	if syn == nil || len(syn) == 0 {
+		return false // Can't determine if zero, so return false (not zero)
+	}
 	for _, row := range syn {
 		for _, v := range row {
 			if v != 0 {

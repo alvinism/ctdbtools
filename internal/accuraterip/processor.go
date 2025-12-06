@@ -180,6 +180,14 @@ func (p *Processor) TrackCRCV2(track int) uint32 {
 	return p.rolling.CRCV2WithOffset(track-1, &p.layout)
 }
 
+// TrackCRC450WithOffset returns the AccurateRip Frame450 CRC for a specific track at given offset.
+// track is 1-based audio track number, oi is offset in samples.
+// This is used for partial offset matching in AccurateRip verification.
+func (p *Processor) TrackCRC450WithOffset(track, oi int) uint32 {
+	// Convert to 0-based index for CRC450WithOffset
+	return p.rolling.CRC450WithOffset(track-1, oi, &p.layout)
+}
+
 // Layout returns the TOC layout used by this processor.
 func (p *Processor) Layout() toc.Layout {
 	return p.layout

@@ -81,6 +81,11 @@ func Parity2Syndrome(stride, stride2, npar, npar2 int, parity []byte, pos, offse
 	if npar > npar2 || stride > stride2 {
 		return nil
 	}
+	// Check that parity buffer is large enough
+	requiredLen := pos + stride2*npar2*2
+	if len(parity) < requiredLen {
+		return nil
+	}
 	syn := make([][]uint16, stride)
 	for y := 0; y < stride; y++ {
 		syn[y] = make([]uint16, npar)
@@ -90,8 +95,12 @@ func Parity2Syndrome(stride, stride2, npar, npar2 int, parity []byte, pos, offse
 		y1 := (y - offset + stride2) % stride2
 		rowBase := pos + y1*npar2*2
 		for x1 := 0; x1 < npar2; x1++ {
-			lo := uint16(parity[rowBase+x1*2])
-			hi := uint16(parity[rowBase+x1*2+1])
+			idx := rowBase + x1*2
+			if idx+1 >= len(parity) {
+				continue // Bounds safety
+			}
+			lo := uint16(parity[idx])
+			hi := uint16(parity[idx+1])
 			if lo == 0 && hi == 0 {
 				continue
 			}
