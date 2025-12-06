@@ -59,8 +59,7 @@ func ParseLogFile(logPath string) (*LogData, error) {
 	}
 
 	// EAC logs are typically UTF-16LE - check for BOM or wide characters
-	// For now, we don't support EAC logs, just return nil to skip
-	// Future: detect and parse EAC logs
+	// For now, we don't support EAC logs just like CUETools not support XLD logs
 	// if isEACLog(content) {
 	//     return ParseEACLog(content)
 	// }
