@@ -11,6 +11,7 @@ import (
 	"ctdbtools/internal/ingest"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var rootCmd = &cobra.Command{
@@ -29,22 +30,28 @@ The path can be:
   - A directory - auto-discovers audio files and optional CUE sheet
 
 By default, queries both AccurateRip and CTDB with parity-based error detection.
-Use --no-ar, --no-ctdb, or --no-parity to disable specific features.`,
+Use --no-ar, --no-ctdb, or --no-parity to disable specific features.
+
+Progress bar is shown by default when running in a terminal.
+Use --progress or --no-progress to override.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVerify,
 }
 
 // Verify command flags
 var (
-	cuePath       string // deprecated, kept for backward compatibility
-	flagNoAR      bool
-	flagNoCTDB    bool
-	flagNoParity  bool
-	flagVerbose   bool
-	flagDebug     bool
-	stride        int
-	lastStride    int
-	npar          int
+	cuePath             string // deprecated, kept for backward compatibility
+	flagNoAR            bool
+	flagNoCTDB          bool
+	flagNoParity        bool
+	flagVerbose         bool
+	flagDebug           bool
+	flagProgress        bool // Show progress bar
+	flagNoProgress      bool // Explicitly disable progress bar
+	flagSeparateDecoding bool // Use separate goroutine for decoding
+	stride              int
+	lastStride          int
+	npar                int
 )
 
 func init() {
@@ -60,6 +67,9 @@ func init() {
 	// Output options
 	verifyCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Verbose output")
 	verifyCmd.Flags().BoolVar(&flagDebug, "debug", false, "Debug output (dump CRC state for comparison with CueTools)")
+	verifyCmd.Flags().BoolVar(&flagProgress, "progress", false, "Show progress bar (default: auto-detect terminal)")
+	verifyCmd.Flags().BoolVar(&flagNoProgress, "no-progress", false, "Disable progress bar")
+	verifyCmd.Flags().BoolVar(&flagSeparateDecoding, "separate-decoding", true, "Use separate goroutine for decoding (like CueTools)")
 
 	// Advanced parity options
 	verifyCmd.Flags().IntVar(&stride, "stride", 588*10*2, "Parity stride in samples")
@@ -67,6 +77,21 @@ func init() {
 	verifyCmd.Flags().IntVar(&npar, "npar", 16, "Number of parity symbols (max 16)")
 
 	rootCmd.AddCommand(verifyCmd)
+}
+
+// shouldShowProgress determines if the progress bar should be shown.
+// Returns true if:
+// - --progress flag is explicitly set, OR
+// - Running in a terminal (isatty) AND --no-progress is not set
+func shouldShowProgress() bool {
+	if flagNoProgress {
+		return false
+	}
+	if flagProgress {
+		return true
+	}
+	// Auto-detect: show progress if stderr is a terminal
+	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
@@ -124,16 +149,18 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	}()
 
 	opts := VerifyOptions{
-		CuePath:    cueFile,
-		DirPath:    dirPath,
-		Stride:     stride,
-		LastStride: lastStride,
-		Npar:       npar,
-		CalcParity: !flagNoParity,
-		QueryAR:    !flagNoAR,
-		QueryCTDB:  !flagNoCTDB,
-		Verbose:    flagVerbose,
-		Debug:      flagDebug,
+		CuePath:          cueFile,
+		DirPath:          dirPath,
+		Stride:           stride,
+		LastStride:       lastStride,
+		Npar:             npar,
+		CalcParity:       !flagNoParity,
+		QueryAR:          !flagNoAR,
+		QueryCTDB:        !flagNoCTDB,
+		Verbose:          flagVerbose,
+		Debug:            flagDebug,
+		ShowProgress:     shouldShowProgress(),
+		SeparateDecoding: flagSeparateDecoding,
 	}
 
 	return Verify(ctx, opts)

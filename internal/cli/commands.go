@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -11,24 +12,27 @@ import (
 	"ctdbtools/internal/logparse"
 	"ctdbtools/internal/network"
 	"ctdbtools/internal/parity"
+	"ctdbtools/internal/progress"
 	"ctdbtools/internal/toc"
 	"ctdbtools/internal/version"
 )
 
 // VerifyOptions holds parameters for a verify run.
 type VerifyOptions struct {
-	AudioPath  string
-	Layout     toc.Layout
-	CuePath    string
-	DirPath    string // Directory path for auto-discovery mode
-	Stride     int
-	LastStride int
-	Npar       int
-	CalcParity bool
-	QueryAR    bool // Query AccurateRip database
-	QueryCTDB  bool // Query CTDB database
-	Verbose    bool // Verbose output
-	Debug      bool // Debug output for CRC comparison
+	AudioPath        string
+	Layout           toc.Layout
+	CuePath          string
+	DirPath          string // Directory path for auto-discovery mode
+	Stride           int
+	LastStride       int
+	Npar             int
+	CalcParity       bool
+	QueryAR          bool // Query AccurateRip database
+	QueryCTDB        bool // Query CTDB database
+	Verbose          bool // Verbose output
+	Debug            bool // Debug output for CRC comparison
+	ShowProgress     bool // Show progress bar during verification
+	SeparateDecoding bool // Use separate goroutine for decoding
 }
 
 // Verify runs a verification pass (decode PCM, compute CRCs/parity, query databases).
@@ -134,16 +138,35 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 		lastStride = opts.Stride + ((finalSampleCount-pregap)*2)%opts.Stride
 	}
 
+	// Create progress reporter if enabled
+	var reporter *progress.Reporter
+	if opts.ShowProgress {
+		reporter = progress.NewReporter(
+			progress.WithOutput(os.Stderr),
+			progress.WithProgressBar(true),
+		)
+	}
+
+	// Build processing options
+	processOpts := ingest.ProcessOptions{
+		Stride:           opts.Stride,
+		LastStride:       lastStride,
+		Npar:             opts.Npar,
+		CalcParity:       opts.CalcParity,
+		Progress:         reporter,
+		SeparateDecoding: opts.SeparateDecoding,
+	}
+
 	// Now process audio with correct lastStride
 	if useCueSheet && sheet.IsSplitTrack() {
 		var err2 error
-		proc, err2 = ingest.ProcessCueSheet(ctx, sheet, opts.Stride, lastStride, opts.Npar, opts.CalcParity)
+		proc, err2 = ingest.ProcessCueSheetWithProgress(ctx, sheet, processOpts)
 		if err2 != nil {
 			return err2
 		}
 	} else {
 		var err error
-		proc, err = ingest.ProcessFile(ctx, opts.AudioPath, layout, opts.Stride, lastStride, opts.Npar, opts.CalcParity)
+		proc, err = ingest.ProcessFileWithProgress(ctx, opts.AudioPath, layout, processOpts)
 		if err != nil {
 			return err
 		}
