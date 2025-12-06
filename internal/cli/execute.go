@@ -15,8 +15,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "ctdbtools",
-	Short: "CUETools database verification tool",
-	Long:  `A CLI tool that replicates CUETools verify/repair functionality for CD ripping verification.`,
+	Short: "CUETools database tools",
+	Long:  `A tool that replicates CUETools verify/repair functionality for CD ripping verification.`,
 }
 
 var verifyCmd = &cobra.Command{
