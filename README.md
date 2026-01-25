@@ -1,6 +1,6 @@
-# CTDB Tool (macOS CLI)
+# CTDB Tool (Cross-Platform cuetools-like CLI)
 
-Goal: Go-based CLI that mirrors CUETools verify/repair on macOS using CTDB and AccurateRip. Uses ffmpeg for decoding and ports CUETools algorithms (TOCID, AccurateRip/CTDB CRCs, parity logic).
+Goal: Go-based CLI that mirrors CUETools verify/repair using CTDB and AccurateRip. Uses ffmpeg for decoding and ports CUETools algorithms (TOCID, AccurateRip/CTDB CRCs, parity logic).
 
 ## Layout
 - `cmd/ctdbtools`: CLI entrypoint(s).
