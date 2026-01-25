@@ -651,3 +651,278 @@ func joinStrings(parts []string, sep string) string {
 	}
 	return result
 }
+
+// CalculateErrorMagnitudes computes error values using Forney's algorithm.
+// This is the key function that enables repair (vs just detection).
+//
+// Formula: e_j = Omega(X_j^-1) / Sigma'(X_j^-1)
+//
+// Where:
+//   - X_j = α^(error_position) is the error locator
+//   - Omega is the error evaluator polynomial: Ω(x) = S(x) * σ(x) mod x^npar
+//   - Sigma' is the formal derivative of the error locator polynomial
+//
+// Parameters:
+//   - syndrome: the XOR of local and CTDB syndromes (error syndrome)
+//   - sigma: error locator polynomial from CalcSigmaMBM
+//   - positions: error positions as GF elements from ChienSearch
+//   - numErrors: number of errors (degree of sigma)
+//
+// Returns: error magnitudes as uint16 values to XOR with samples at positions
+//
+// This implementation matches CUETools.Parity/RsDecode.cs:239-263.
+func (r *RsDecode) CalculateErrorMagnitudes(syndrome, sigma []int, positions []int, numErrors int) []uint16 {
+	if numErrors == 0 || len(positions) == 0 {
+		return nil
+	}
+
+	// Compute error evaluator polynomial Omega
+	omega := r.computeOmega(syndrome, sigma, numErrors)
+
+	// Compute formal derivative of sigma
+	sigmaPrime := r.formalDerivative(sigma, numErrors)
+
+	magnitudes := make([]uint16, numErrors)
+
+	for i := 0; i < numErrors && i < len(positions); i++ {
+		pos := positions[i]
+		if pos == 0 {
+			// Position 0 means error at α^0 = 1, handle specially
+			// X^(-1) = 1, so just evaluate directly
+			omegaVal := r.evaluatePolynomial(omega, 0, numErrors)
+			sigmaDerivVal := r.evaluatePolynomial(sigmaPrime, 0, numErrors-1)
+			if sigmaDerivVal != 0 {
+				// Forney formula: E^i = pos * Ω(z) / σ'(z)
+				// For pos=0 (which is α^0=1), multiply by 1 (no change needed in value,
+				// but pos=0 in GF is actually the zero element, so this case shouldn't happen
+				// for valid error positions)
+				magnitudes[i] = uint16(r.galois.div(omegaVal, sigmaDerivVal))
+			}
+			continue
+		}
+
+		// X_j^(-1) = α^(-log(X_j)) = α^(max - log(X_j))
+		// In log domain: xInvLog = max - log(pos)
+		logPos := r.galois.toLog(pos)
+		xInvLog := r.galois.max - logPos
+
+		// Evaluate Omega and Sigma' at X_j^(-1)
+		omegaVal := r.evaluatePolynomialAtLogX(omega, xInvLog, numErrors)
+		sigmaDerivVal := r.evaluatePolynomialAtLogX(sigmaPrime, xInvLog, numErrors-1)
+
+		if sigmaDerivVal != 0 {
+			// Forney formula: E^i = pos * Ω(z) / σ'(z)
+			// This matches CUETools.Parity/RsDecode.cs:262:
+			// return galois.mul(ps, galois.div(ov, dv));
+			magnitudes[i] = uint16(r.galois.mul(pos, r.galois.div(omegaVal, sigmaDerivVal)))
+		}
+	}
+
+	return magnitudes
+}
+
+// computeOmega calculates the error evaluator polynomial: Omega(x) = S(x) * Sigma(x) mod x^npar
+//
+// The error evaluator polynomial is used in Forney's algorithm to compute
+// error magnitudes. It's computed by multiplying the syndrome polynomial
+// by the error locator polynomial, keeping only terms below x^npar.
+//
+// Omega[i] = S[i] + sigma[1]*S[i-1] + sigma[2]*S[i-2] + ... + sigma[i]*S[0]
+func (r *RsDecode) computeOmega(syndrome, sigma []int, numErrors int) []int {
+	// Omega has at most numErrors terms (indices 0 to numErrors-1)
+	omega := make([]int, numErrors)
+
+	for i := 0; i < numErrors; i++ {
+		// Start with S[i]
+		omega[i] = syndrome[i]
+
+		// Add sigma[j] * S[i-j] for j = 1 to min(i, numErrors)
+		for j := 1; j <= i && j <= numErrors; j++ {
+			if j < len(sigma) && (i-j) < len(syndrome) {
+				omega[i] ^= r.galois.mul(sigma[j], syndrome[i-j])
+			}
+		}
+	}
+
+	return omega
+}
+
+// formalDerivative computes Sigma'(x) - the formal derivative of the error locator.
+//
+// In GF(2^n), the formal derivative has a special form:
+// For f(x) = a_0 + a_1*x + a_2*x^2 + a_3*x^3 + ...
+// f'(x) = a_1 + 0*x + a_3*x^2 + 0*x^3 + a_5*x^4 + ...
+//
+// Only odd-indexed coefficients survive, shifted down by one position.
+// This is because in GF(2), 2=0, so even-indexed terms vanish.
+//
+// For sigma = [1, s1, s2, s3, s4, ...]
+// sigmaPrime = [s1, 0, s3, 0, s5, ...] = [s1, s3, s5, ...] (packed)
+func (r *RsDecode) formalDerivative(sigma []int, numErrors int) []int {
+	// The derivative has numErrors terms (degree numErrors-1)
+	derivative := make([]int, numErrors)
+
+	for i := 0; i < numErrors; i++ {
+		// Coefficient at position i in derivative comes from
+		// coefficient at position i+1 in sigma, but only if i+1 is odd
+		if (i+1)%2 == 1 && (i+1) < len(sigma) {
+			// i+1 is odd, so this term survives
+			derivative[i] = sigma[i+1]
+		} else {
+			derivative[i] = 0
+		}
+	}
+
+	return derivative
+}
+
+// evaluatePolynomial evaluates a polynomial at point x in GF(2^16).
+// Uses standard evaluation (not log domain for the point).
+func (r *RsDecode) evaluatePolynomial(poly []int, x, degree int) int {
+	if degree < 0 || len(poly) == 0 {
+		return 0
+	}
+
+	result := 0
+	xPow := 1 // x^0 = 1
+
+	for i := 0; i <= degree && i < len(poly); i++ {
+		if poly[i] != 0 {
+			result ^= r.galois.mul(poly[i], xPow)
+		}
+		if i < degree {
+			xPow = r.galois.mul(xPow, x)
+		}
+	}
+
+	return result
+}
+
+// evaluatePolynomialAtLogX evaluates a polynomial at x where logX = log_alpha(x).
+// This is more efficient when x is given in log form.
+//
+// poly[i] * x^i = poly[i] * α^(logX * i)
+// In log domain: exp[log[poly[i]] + logX * i]
+func (r *RsDecode) evaluatePolynomialAtLogX(poly []int, logX, degree int) int {
+	if degree < 0 || len(poly) == 0 {
+		return 0
+	}
+
+	result := 0
+
+	for i := 0; i <= degree && i < len(poly); i++ {
+		if poly[i] != 0 {
+			// poly[i] * x^i where x = α^logX
+			// = α^(log(poly[i]) + logX * i)
+			logCoef := r.galois.toLog(poly[i])
+			exp := logCoef + logX*i
+
+			// Reduce modulo max (the field order is max+1, with max being 2^16-1)
+			// Handle wrap-around: exp might be > max
+			exp = (exp % r.galois.max) + (exp / r.galois.max)
+			if exp >= r.galois.max {
+				exp -= r.galois.max
+			}
+
+			result ^= r.galois.toExp(exp)
+		}
+	}
+
+	return result
+}
+
+// CalculateCorrections performs full error correction: detection + magnitude calculation.
+// This is the main entry point for repair functionality.
+//
+// Parameters:
+//   - localSyn: local syndrome matrix [stride][npar]
+//   - ctdbSyn: CTDB syndrome matrix [stride][npar]
+//   - stride: parity stride
+//   - stridecount: number of data strides
+//   - pregap: pregap in 16-bit samples
+//   - actualOffset: detected drive offset (stereo samples)
+//
+// Returns:
+//   - corrections: slice of (position, magnitude) pairs
+//   - errorCount: total number of errors found
+//   - error: non-nil if too many errors to correct
+func (r *RsDecode) CalculateCorrections(localSyn, ctdbSyn [][]uint16, stride, stridecount, pregap, actualOffset int) (corrections []ErrorCorrection, errorCount int, err error) {
+	if len(localSyn) == 0 || len(ctdbSyn) == 0 {
+		return nil, 0, nil
+	}
+
+	// Use minimum length of syndromes
+	synLen := len(localSyn)
+	if len(ctdbSyn) < synLen {
+		synLen = len(ctdbSyn)
+	}
+	if synLen > stride {
+		synLen = stride
+	}
+
+	sigma := make([]int, r.npar+1)
+	corrections = make([]ErrorCorrection, 0)
+
+	// Process each stride row (part2 in CueTools)
+	for part2 := 0; part2 < synLen; part2++ {
+		// XOR syndromes to get error syndrome
+		errSyn := make([]int, r.npar)
+		hasError := false
+		for i := 0; i < r.npar && i < len(localSyn[part2]) && i < len(ctdbSyn[part2]); i++ {
+			errSyn[i] = int(localSyn[part2][i] ^ ctdbSyn[part2][i])
+			if errSyn[i] != 0 {
+				hasError = true
+			}
+		}
+
+		if !hasError {
+			continue // No error in this stride row
+		}
+
+		// Find error locator polynomial
+		numErr := r.CalcSigmaMBM(errSyn, sigma)
+		if numErr < 0 {
+			return nil, -1, fmt.Errorf("uncorrectable errors in stride row %d: too many errors", part2)
+		}
+
+		// Find error positions using ChienSearch
+		errPos := r.ChienSearch(sigma, stridecount, numErr)
+		if errPos == nil {
+			return nil, -1, fmt.Errorf("uncorrectable errors in stride row %d: could not locate all errors", part2)
+		}
+
+		// Calculate error magnitudes using Forney
+		magnitudes := r.CalculateErrorMagnitudes(errSyn, sigma, errPos, numErr)
+		if magnitudes == nil {
+			return nil, -1, fmt.Errorf("failed to calculate error magnitudes in stride row %d", part2)
+		}
+
+		// Convert to sample positions and store corrections
+		for i, pos := range errPos {
+			// Convert GF element to position: length - 1 - log(pos)
+			gfPos := r.galois.toPos(stridecount, pos)
+			samplePos := gfPos*stride + part2
+
+			// Apply offset and pregap adjustment (CueTools CDRepair.cs:212-213)
+			// erroffi = stride + pos + pregap * 2 - actualOffset * 2
+			erroffi := stride + samplePos + pregap - actualOffset*2
+
+			if erroffi >= 0 && magnitudes[i] != 0 {
+				corrections = append(corrections, ErrorCorrection{
+					Position:  erroffi,
+					Magnitude: magnitudes[i],
+				})
+			}
+		}
+
+		errorCount += numErr
+	}
+
+	return corrections, errorCount, nil
+}
+
+// ErrorCorrection represents a single error correction: position and XOR magnitude.
+type ErrorCorrection struct {
+	Position  int    // Position in 16-bit samples
+	Magnitude uint16 // XOR value to apply
+}

@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"ctdbtools/internal/accuraterip"
@@ -13,6 +16,7 @@ import (
 	"ctdbtools/internal/network"
 	"ctdbtools/internal/parity"
 	"ctdbtools/internal/progress"
+	"ctdbtools/internal/repair"
 	"ctdbtools/internal/toc"
 	"ctdbtools/internal/version"
 )
@@ -1325,4 +1329,345 @@ func getLogStatus(crc32, crcwn uint32, logTrack *logparse.TrackLogData) string {
 	}
 
 	return "          "
+}
+
+// RepairOptions holds parameters for a repair run.
+type RepairOptions struct {
+	CuePath      string
+	DirPath      string
+	OutputDir    string
+	Stride       int
+	Npar         int
+	Auto         bool
+	DryRun       bool
+	Force        bool
+	Verbose      bool
+	ShowProgress bool
+}
+
+// Repair runs the repair process on an audio file using CTDB parity data.
+func Repair(ctx context.Context, opts RepairOptions) error {
+	fmt.Printf("[CTDBTools repair; Date: %s; Version: %s]\n",
+		time.Now().Format("2006/01/02 15:04:05"),
+		version.Version)
+
+	var layout toc.Layout
+	var sheet ingest.CueSheet
+	var useCueSheet bool
+	var proc *accuraterip.Processor
+
+	// Parse input
+	if opts.DirPath != "" {
+		var err error
+		sheet, err = ingest.DiscoverDirectory(ctx, opts.DirPath)
+		if err != nil {
+			return fmt.Errorf("failed to discover audio files: %w", err)
+		}
+		layout = sheet.Layout
+		useCueSheet = true
+	} else if opts.CuePath != "" {
+		var err error
+		sheet, err = ingest.ParseCueSheetFile(opts.CuePath)
+		if err != nil {
+			return fmt.Errorf("failed to parse CUE: %w", err)
+		}
+		layout = sheet.Layout
+		useCueSheet = true
+	} else {
+		return fmt.Errorf("path required (CUE file or directory)")
+	}
+
+	// Handle split tracks vs single file
+	isSplitTrack := useCueSheet && sheet.IsSplitTrack()
+
+	if isSplitTrack {
+		// Split track mode: probe each file for accurate durations
+		err := probeSplitTrackDurations(ctx, &sheet)
+		if err != nil {
+			return fmt.Errorf("failed to probe track durations: %w", err)
+		}
+		layout = sheet.Layout
+	} else {
+		// Single file mode - get audio path
+		var audioPath string
+		if useCueSheet && len(sheet.Sources) > 0 {
+			audioPath = sheet.Sources[0].FilePath
+			if audioPath != "" && sheet.CueDir != "" {
+				audioPath = sheet.CueDir + "/" + audioPath
+			}
+		}
+		if audioPath == "" {
+			return fmt.Errorf("audio path required")
+		}
+
+		// Probe duration for accurate leadout
+		if frames, err := ingest.ProbeDurationFrames(ctx, audioPath); err == nil && frames > 0 {
+			if len(layout.Tracks) > 0 {
+				lastIdx := len(layout.Tracks) - 1
+				lastTrack := &layout.Tracks[lastIdx]
+				lastTrack.Length = frames - lastTrack.Start
+				layout.Leadout = frames
+			}
+		}
+	}
+
+	// Compute lastStride
+	finalSampleCount := layout.AudioLengthFrames() * 588
+	pregap := 0
+	if len(layout.Tracks) > 0 {
+		pregap = layout.Tracks[0].Pregap * 588
+	}
+	lastStride := opts.Stride + ((finalSampleCount-pregap)*2)%opts.Stride
+
+	// Create progress reporter
+	var reporter *progress.Reporter
+	if opts.ShowProgress {
+		reporter = progress.NewReporter(
+			progress.WithOutput(os.Stderr),
+			progress.WithProgressBar(true),
+		)
+	}
+
+	// Process audio
+	processOpts := ingest.ProcessOptions{
+		Stride:           opts.Stride,
+		LastStride:       lastStride,
+		Npar:             16, // Use max npar for parity calculation
+		CalcParity:       true,
+		Progress:         reporter,
+		SeparateDecoding: true,
+	}
+
+	var err error
+	if isSplitTrack {
+		proc, err = ingest.ProcessCueSheetWithProgress(ctx, sheet, processOpts)
+	} else {
+		audioPath := sheet.Sources[0].FilePath
+		if audioPath != "" && sheet.CueDir != "" {
+			audioPath = sheet.CueDir + "/" + audioPath
+		}
+		proc, err = ingest.ProcessFileWithProgress(ctx, audioPath, layout, processOpts)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to process audio: %w", err)
+	}
+
+	// Query CTDB
+	fmt.Println("Querying CTDB for parity data...")
+
+	tocStr := layout.TOCString()
+	tocID, tocErr := layout.TOCID()
+
+	httpClient := network.NewHTTPClient()
+	ctdbClient := network.NewCTDBClient(httpClient)
+
+	resp, err := ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
+		TOC:            tocStr,
+		CTDB:           true,
+		Fuzzy:          false,
+		MetadataSearch: network.CTDBMetadataSearchNone,
+	})
+	if err != nil {
+		if err == network.ErrNotFound {
+			if tocErr != nil {
+				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
+			} else {
+				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
+			}
+			return fmt.Errorf("no CTDB entries found for this disc")
+		}
+		return fmt.Errorf("CTDB lookup failed: %w", err)
+	}
+
+	if tocErr != nil {
+		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
+	} else {
+		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
+	}
+
+	// Filter entries with parity data
+	var candidates []*repair.RepairCandidate
+	for i, entry := range resp.Entries {
+		if entry.HasParity == "" {
+			continue
+		}
+
+		// Fetch parity data
+		ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
+		if err != nil {
+			if opts.Verbose {
+				fmt.Printf("  Skipping entry %d: failed to fetch parity: %v\n", i+1, err)
+			}
+			continue
+		}
+
+		// Analyze entry
+		entryCopy := entry
+		candidate, err := repair.AnalyzeEntry(proc, &entryCopy, ctdbSyndrome, layout, i)
+		if err != nil {
+			continue
+		}
+
+		candidates = append(candidates, candidate)
+	}
+
+	if len(candidates) == 0 {
+		return fmt.Errorf("no CTDB entries with parity data found")
+	}
+
+	fmt.Printf("Found %d CTDB entries with parity:\n\n", len(candidates))
+
+	// Display candidates
+	fmt.Println("  #  Confidence  Errors  Error Positions")
+	for i, c := range candidates {
+		errStr := "0"
+		if c.ErrorCount > 0 {
+			errStr = fmt.Sprintf("%d", c.ErrorCount)
+		} else if c.ErrorCount < 0 {
+			errStr = "?"
+		}
+
+		positions := c.ErrorPositions
+		if positions == "" {
+			positions = "(no errors)"
+		}
+
+		fmt.Printf("  %d  %-10d  %-6s  %s\n", i+1, c.Entry.Confidence, errStr, positions)
+	}
+	fmt.Println()
+
+	// Select candidate
+	var selected *repair.RepairCandidate
+	if opts.Auto {
+		// Auto-select: prefer no errors, then highest confidence
+		for _, c := range candidates {
+			if c.ErrorCount == 0 {
+				selected = c
+				break
+			}
+		}
+		if selected == nil {
+			// No perfect match, select first correctable entry
+			for _, c := range candidates {
+				if c.CanRepair {
+					selected = c
+					break
+				}
+			}
+		}
+		if selected != nil {
+			fmt.Printf("Auto-selected entry #%d (confidence %d)\n", selected.Index+1, selected.Entry.Confidence)
+		}
+	} else {
+		// Interactive selection
+		selected = selectRepairCandidate(candidates)
+	}
+
+	if selected == nil {
+		return fmt.Errorf("no suitable entry selected")
+	}
+
+	// Check if repair is needed
+	if selected.ErrorCount == 0 {
+		fmt.Println("\nNo errors detected - file matches CTDB perfectly!")
+		return nil
+	}
+
+	if !selected.CanRepair {
+		return fmt.Errorf("errors cannot be corrected (too many errors per stride row)")
+	}
+
+	// Fetch parity for selected entry
+	ctdbSyndrome, err := ctdbClient.FetchParity(ctx, selected.Entry, selected.Entry.Npar)
+	if err != nil {
+		return fmt.Errorf("failed to fetch parity data: %w", err)
+	}
+
+	// Execute repair
+	fmt.Printf("\nRepairing %d errors using entry #%d (confidence %d)...\n\n",
+		selected.ErrorCount, selected.Index+1, selected.Entry.Confidence)
+
+	// Determine input path for repair
+	inputPath := opts.CuePath
+	if inputPath == "" {
+		inputPath = opts.DirPath
+	}
+
+	repairOpts := repair.RepairOptions{
+		InputPath:    inputPath,
+		OutputDir:    opts.OutputDir,
+		Layout:       layout,
+		Stride:       selected.Entry.Stride,
+		Npar:         selected.Entry.Npar,
+		Auto:         opts.Auto,
+		DryRun:       opts.DryRun,
+		Force:        opts.Force,
+		Verbose:      opts.Verbose,
+		ShowProgress: opts.ShowProgress,
+	}
+
+	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)
+	if err != nil {
+		return fmt.Errorf("repair failed: %w", err)
+	}
+
+	// Display track results
+	fmt.Println("Track | Status")
+	fmt.Println("----- | ------")
+	for _, tr := range result.TrackResults {
+		status := "OK (no errors)"
+		if tr.ErrorCount > 0 {
+			status = fmt.Sprintf("Repaired %d samples @%s", tr.ErrorCount, tr.Positions)
+		}
+		fmt.Printf(" %02d   | %s\n", tr.Track, status)
+	}
+
+	if opts.DryRun {
+		fmt.Println("\n(dry-run mode - no files written)")
+		return nil
+	}
+
+	// Write output files
+	outputFiles, err := repair.WriteOutputFiles(opts.OutputDir, result, layout)
+	if err != nil {
+		return fmt.Errorf("failed to write output files: %w", err)
+	}
+
+	fmt.Printf("\nOutput files written to %s:\n", opts.OutputDir)
+	fmt.Printf("  - %s\n", filepath.Base(outputFiles.WAVPath))
+	fmt.Printf("  - %s\n", filepath.Base(outputFiles.CUEPath))
+	fmt.Printf("  - %s\n", filepath.Base(outputFiles.LogPath))
+
+	fmt.Printf("\nRepair complete. Verify with: ctdbtools verify %s/%s\n",
+		opts.OutputDir, filepath.Base(outputFiles.CUEPath))
+
+	return nil
+}
+
+// selectRepairCandidate prompts user to select a repair candidate.
+func selectRepairCandidate(candidates []*repair.RepairCandidate) *repair.RepairCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Select entry for repair (1-%d): ", len(candidates))
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil
+		}
+
+		input = strings.TrimSpace(input)
+		idx, err := strconv.Atoi(input)
+		if err != nil || idx < 1 || idx > len(candidates) {
+			fmt.Printf("Invalid selection. Enter a number between 1 and %d.\n", len(candidates))
+			continue
+		}
+
+		return candidates[idx-1]
+	}
 }

@@ -38,20 +38,54 @@ Use --progress or --no-progress to override.`,
 	RunE: runVerify,
 }
 
+var repairCmd = &cobra.Command{
+	Use:   "repair <path>",
+	Short: "Repair audio file using CTDB parity data",
+	Long: `Repair audio files using Reed-Solomon error correction with CTDB parity data.
+
+The path can be:
+  - A CUE file (.cue) - parses track layout from CUE sheet
+  - A directory - auto-discovers audio files and optional CUE sheet
+
+The repair process:
+  1. Queries CTDB for parity data
+  2. Detects errors using Berlekamp-Massey and Chien search
+  3. Calculates error magnitudes using Forney algorithm
+  4. Applies XOR corrections to produce corrected output
+
+Output is written to a directory containing:
+  - album.wav - Corrected audio (44.1kHz, 16-bit, stereo)
+  - album.cue - CUE sheet with track indices
+  - album.log - Repair log with details
+
+Use --dry-run to see what would be repaired without writing files.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRepair,
+}
+
 // Verify command flags
 var (
-	cuePath             string // deprecated, kept for backward compatibility
-	flagNoAR            bool
-	flagNoCTDB          bool
-	flagNoParity        bool
-	flagVerbose         bool
-	flagDebug           bool
-	flagProgress        bool // Show progress bar
-	flagNoProgress      bool // Explicitly disable progress bar
+	cuePath              string // deprecated, kept for backward compatibility
+	flagNoAR             bool
+	flagNoCTDB           bool
+	flagNoParity         bool
+	flagVerbose          bool
+	flagDebug            bool
+	flagProgress         bool // Show progress bar
+	flagNoProgress       bool // Explicitly disable progress bar
 	flagSeparateDecoding bool // Use separate goroutine for decoding
-	stride              int
-	lastStride          int
-	npar                int
+	stride               int
+	lastStride           int
+	npar                 int
+)
+
+// Repair command flags
+var (
+	repairOutput   string
+	repairAuto     bool
+	repairDryRun   bool
+	repairForce    bool
+	repairVerbose  bool
 )
 
 func init() {
@@ -77,6 +111,17 @@ func init() {
 	verifyCmd.Flags().IntVar(&npar, "npar", 16, "Number of parity symbols (max 16)")
 
 	rootCmd.AddCommand(verifyCmd)
+
+	// Repair command flags
+	repairCmd.Flags().StringVarP(&repairOutput, "output", "o", "", "Output directory path (default: <input>_repaired/)")
+	repairCmd.Flags().BoolVar(&repairAuto, "auto", false, "Auto-select highest confidence CTDB entry")
+	repairCmd.Flags().BoolVar(&repairDryRun, "dry-run", false, "Show repair info without writing files")
+	repairCmd.Flags().BoolVar(&repairForce, "force", false, "Overwrite existing output directory")
+	repairCmd.Flags().BoolVarP(&repairVerbose, "verbose", "v", false, "Verbose output")
+	repairCmd.Flags().BoolVar(&flagProgress, "progress", false, "Show progress bar (default: auto-detect terminal)")
+	repairCmd.Flags().BoolVar(&flagNoProgress, "no-progress", false, "Disable progress bar")
+
+	rootCmd.AddCommand(repairCmd)
 }
 
 // shouldShowProgress determines if the progress bar should be shown.
@@ -164,6 +209,72 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	}
 
 	return Verify(ctx, opts)
+}
+
+func runRepair(cmd *cobra.Command, args []string) error {
+	// Check required dependencies first
+	if err := ingest.CheckDependencies(); err != nil {
+		return err
+	}
+
+	inputPath := args[0]
+
+	// Check input path exists
+	info, err := os.Stat(inputPath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("path not found: %s", inputPath)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+
+	// Determine input type
+	var cueFile string
+	var dirPath string
+
+	if info.IsDir() {
+		dirPath = inputPath
+	} else if strings.HasSuffix(strings.ToLower(inputPath), ".cue") {
+		cueFile = inputPath
+	} else {
+		return fmt.Errorf("path must be a CUE file (.cue) or directory: %s", inputPath)
+	}
+
+	// Determine output directory
+	outputDir := repairOutput
+	if outputDir == "" {
+		// Default: <input>_repaired/
+		base := strings.TrimSuffix(inputPath, ".cue")
+		outputDir = base + "_repaired"
+	}
+
+	// Setup context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\nInterrupted, cancelling...")
+		cancel()
+	}()
+
+	opts := RepairOptions{
+		CuePath:      cueFile,
+		DirPath:      dirPath,
+		OutputDir:    outputDir,
+		Stride:       588 * 10 * 2, // Default stride
+		Npar:         8,            // Default npar
+		Auto:         repairAuto,
+		DryRun:       repairDryRun,
+		Force:        repairForce,
+		Verbose:      repairVerbose,
+		ShowProgress: shouldShowProgress(),
+	}
+
+	return Repair(ctx, opts)
 }
 
 // Execute is the entry point for the ctdbtools CLI.
