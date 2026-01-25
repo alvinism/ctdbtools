@@ -233,12 +233,58 @@ Errors must be within the valid stridecount range:
 - Last stride (lead-out) excluded
 - Positions outside `[0, stridecount)` cannot be located
 
-### Offset Dependency
+### Offset Detection and Offset-Free Repair
 
-The correct offset must be known for repair to work:
-1. Find offset using CRC matching (same as verify)
-2. Adjust syndrome comparison for offset
-3. Convert GF positions to sample positions with offset adjustment
+CD drives have different read offsets (typically -600 to +700 samples). When a disc
+is ripped, the audio samples are shifted by this offset relative to the "true" disc
+position. CTDB parity data represents the "correct" audio at offset 0.
+
+**Key principle: Repair is offset-free.** The output audio has the SAME LENGTH as
+the input. We don't shift audio, only fix errors.
+
+#### Offset Detection Algorithm
+
+Two approaches, in priority order:
+
+1. **Syndrome-based detection (fast)**: O(npar) per offset
+   - XOR local syndrome with CTDB syndrome at each offset
+   - If result is all zeros, we found the correct offset
+   - This is ~100x faster than CRC-based for typical parameters
+
+2. **CRC-based detection (slow fallback)**: O(samples) per offset
+   - Compute disc CRC at each offset and compare to CTDB entry CRC
+   - Used when syndrome data is unavailable
+
+```go
+// Syndrome-based is preferred (fast)
+if offset := findOffsetBySyndrome(proc, ctdbSyndrome, stride, npar); offset != 0 {
+    return offset
+}
+// Fall back to CRC-based (slow)
+return findOffsetByCRC(proc, entry.CRC32, stride, laststride)
+```
+
+#### How Offset Is Used
+
+1. **Syndrome comparison**: Syndromes are computed at the detected offset to align
+   with CTDB reference
+
+2. **Error position calculation**: Error positions from the RS decoder are in
+   CTDB reference space; no offset adjustment needed for correction application
+
+3. **Correction application**: Corrections are applied at absolute sample positions
+   in the input stream. The output stream has the same length as input.
+
+#### Why Output Isn't Shifted
+
+The repair process:
+1. Reads input audio as a stream of samples
+2. At each sample position, checks if a correction is needed
+3. If yes, XORs the correction magnitude with the sample
+4. Writes the (possibly corrected) sample to output
+
+The sample position in the output matches the sample position in the input.
+No samples are added or removed, so the audio length is preserved.
 
 ### Error Types
 
@@ -270,8 +316,10 @@ It cannot handle:
 |------|---------|
 | `internal/parity/rsdecode.go` | RS decoder with Forney |
 | `internal/parity/galois.go` | GF(2^16) arithmetic |
-| `internal/repair/repair.go` | Repair orchestration |
-| `internal/repair/apply.go` | Correction application |
+| `internal/repair/repair.go` | Repair orchestration with offset detection |
+| `internal/repair/apply.go` | Correction application with progress |
+| `internal/audio/wavwriter.go` | WAV file output (implements AudioWriter) |
+| `internal/audio/writer.go` | AudioWriter interface for extensibility |
 
 ## Example: Single Error Correction
 
