@@ -1,4 +1,4 @@
-package repair
+package audio
 
 import (
 	"encoding/binary"
@@ -9,11 +9,15 @@ import (
 
 // WAVWriter writes RedBook-quality audio to a WAV file.
 // Output format: 44.1kHz, 16-bit, stereo (CD quality).
+// Implements the AudioWriter interface.
 type WAVWriter struct {
 	file       *os.File
 	dataSize   uint32
 	headerSize int64
 }
+
+// Compile-time check that WAVWriter implements AudioWriter
+var _ AudioWriter = (*WAVWriter)(nil)
 
 // WAV file constants for RedBook audio
 const (
