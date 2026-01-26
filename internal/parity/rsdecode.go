@@ -360,12 +360,17 @@ func (r *RsDecode) DetectErrorsWithOffset(localSyn, ctdbSyn [][]uint16, stride, 
 	}
 
 	sigma := make([]int, r.npar+1)
+	errSyn := make([]int, r.npar) // Hoisted outside loop to avoid ~80,000 allocations
 	allPositions := make([]int, 0)
 
 	// Process each stride row (part2 in CueTools)
 	for part2 := 0; part2 < synLen; part2++ {
+		// Clear and reuse errSyn buffer
+		for i := range errSyn {
+			errSyn[i] = 0
+		}
+
 		// XOR syndromes to get error syndrome
-		errSyn := make([]int, r.npar)
 		hasError := false
 		for i := 0; i < r.npar && i < len(localSyn[part2]) && i < len(ctdbSyn[part2]); i++ {
 			errSyn[i] = int(localSyn[part2][i] ^ ctdbSyn[part2][i])
@@ -815,14 +820,7 @@ func (r *RsDecode) evaluatePolynomialAtLogX(poly []int, logX, degree int) int {
 			// poly[i] * x^i where x = α^logX
 			// = α^(log(poly[i]) + logX * i)
 			logCoef := r.galois.toLog(poly[i])
-			exp := logCoef + logX*i
-
-			// Reduce modulo max (the field order is max+1, with max being 2^16-1)
-			// Handle wrap-around: exp might be > max
-			exp = (exp % r.galois.max) + (exp / r.galois.max)
-			if exp >= r.galois.max {
-				exp -= r.galois.max
-			}
+			exp := (logCoef + logX*i) % r.galois.max
 
 			result ^= r.galois.toExp(exp)
 		}
@@ -861,12 +859,17 @@ func (r *RsDecode) CalculateCorrections(localSyn, ctdbSyn [][]uint16, stride, st
 	}
 
 	sigma := make([]int, r.npar+1)
+	errSyn := make([]int, r.npar) // Hoisted outside loop to avoid ~80,000 allocations
 	corrections = make([]ErrorCorrection, 0)
 
 	// Process each stride row (part2 in CueTools)
 	for part2 := 0; part2 < synLen; part2++ {
+		// Clear and reuse errSyn buffer
+		for i := range errSyn {
+			errSyn[i] = 0
+		}
+
 		// XOR syndromes to get error syndrome
-		errSyn := make([]int, r.npar)
 		hasError := false
 		for i := 0; i < r.npar && i < len(localSyn[part2]) && i < len(ctdbSyn[part2]); i++ {
 			errSyn[i] = int(localSyn[part2][i] ^ ctdbSyn[part2][i])

@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
 	"ctdbtools/internal/parity"
+	"ctdbtools/internal/progress"
 	"ctdbtools/internal/toc"
 )
 
@@ -25,7 +27,10 @@ func ApplyCorrections(
 	corrections []parity.ErrorCorrection,
 	layout toc.Layout,
 	opts RepairOptions,
+	reporter *progress.Reporter,
 ) error {
+	// Calculate total samples for progress reporting
+	totalSamples := int64(layout.AudioLengthFrames()) * 588
 	// Ensure output directory exists
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
@@ -38,7 +43,7 @@ func ApplyCorrections(
 	}
 
 	// Create WAV writer
-	writer, err := NewWAVWriter(wavPath)
+	writer, err := audio.NewWAVWriter(wavPath)
 	if err != nil {
 		return err
 	}
@@ -65,7 +70,7 @@ func ApplyCorrections(
 
 	// Check if split-track (multiple source files)
 	if sheet.IsSplitTrack() {
-		return applyCorrectionsSplitTrack(ctx, sheet, writer, corrections)
+		return applyCorrectionsSplitTrack(ctx, sheet, writer, corrections, reporter, totalSamples, layout.AudioTracks)
 	}
 
 	// Single file mode
@@ -74,15 +79,17 @@ func ApplyCorrections(
 		audioPath = filepath.Join(sheet.CueDir, audioPath)
 	}
 
-	return applyCorrectionsSingleFile(ctx, audioPath, writer, corrections)
+	return applyCorrectionsSingleFile(ctx, audioPath, writer, corrections, reporter, totalSamples)
 }
 
 // applyCorrectionsSingleFile handles repair for single-file CUE sheets.
 func applyCorrectionsSingleFile(
 	ctx context.Context,
 	audioPath string,
-	writer *WAVWriter,
+	writer *audio.WAVWriter,
 	corrections []parity.ErrorCorrection,
+	reporter *progress.Reporter,
+	totalSamples int64,
 ) error {
 	// Stream audio through FFmpeg
 	stream, cmd, err := ingest.PCMStream(ctx, audioPath)
@@ -97,6 +104,7 @@ func applyCorrectionsSingleFile(
 
 	corrIdx := 0
 	sampleIdx := 0 // Current stereo sample index
+	lastReportedSample := 0
 
 	buf := make([]byte, 4096)
 
@@ -142,6 +150,12 @@ func applyCorrectionsSingleFile(
 			}
 
 			sampleIdx++
+
+			// Report progress every 10000 samples
+			if reporter != nil && sampleIdx-lastReportedSample >= 10000 {
+				reporter.Update(int64(sampleIdx), 0, "Applying corrections...")
+				lastReportedSample = sampleIdx
+			}
 		}
 	}
 
@@ -158,17 +172,27 @@ func applyCorrectionsSingleFile(
 func applyCorrectionsSplitTrack(
 	ctx context.Context,
 	sheet ingest.CueSheet,
-	writer *WAVWriter,
+	writer *audio.WAVWriter,
 	corrections []parity.ErrorCorrection,
+	reporter *progress.Reporter,
+	totalSamples int64,
+	totalTracks int,
 ) error {
 	corrIdx := 0
 	globalSampleIdx := 0 // Global stereo sample counter across all tracks
+	lastReportedSample := 0
 
 	// Process each track file
-	for _, source := range sheet.Sources {
+	for trackNum, source := range sheet.Sources {
 		audioPath := source.FilePath
 		if audioPath != "" && sheet.CueDir != "" {
 			audioPath = filepath.Join(sheet.CueDir, audioPath)
+		}
+
+		// Report progress for this track
+		if reporter != nil {
+			reporter.ForceUpdate(int64(globalSampleIdx), trackNum+1,
+				fmt.Sprintf("Applying corrections to track %d/%d...", trackNum+1, totalTracks))
 		}
 
 		// Stream this track
@@ -177,7 +201,7 @@ func applyCorrectionsSplitTrack(
 			return fmt.Errorf("failed to start stream for %s: %w", audioPath, err)
 		}
 
-		err = processStreamWithCorrections(ctx, stream, writer, corrections, &corrIdx, &globalSampleIdx)
+		err = processStreamWithCorrections(ctx, stream, writer, corrections, &corrIdx, &globalSampleIdx, reporter, &lastReportedSample, trackNum+1)
 
 		// Clean up
 		stream.Close()
@@ -204,10 +228,13 @@ func applyCorrectionsSplitTrack(
 func processStreamWithCorrections(
 	ctx context.Context,
 	stream io.Reader,
-	writer *WAVWriter,
+	writer *audio.WAVWriter,
 	corrections []parity.ErrorCorrection,
 	corrIdx *int,
 	sampleIdx *int,
+	reporter *progress.Reporter,
+	lastReportedSample *int,
+	currentTrack int,
 ) error {
 	buf := make([]byte, 4096)
 
@@ -249,6 +276,12 @@ func processStreamWithCorrections(
 			}
 
 			(*sampleIdx)++
+
+			// Report progress every 10000 samples
+			if reporter != nil && *sampleIdx-*lastReportedSample >= 10000 {
+				reporter.Update(int64(*sampleIdx), currentTrack, "Applying corrections...")
+				*lastReportedSample = *sampleIdx
+			}
 		}
 	}
 

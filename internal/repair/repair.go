@@ -44,14 +44,30 @@ func Execute(
 	strideCount := ((finalSampleCount - pregap) * 2) / stride - 2
 	pregap16bit := pregap * 2
 
-	// Find the correct offset
-	offset := findOffset(proc, entry, stride, laststride)
+	// Report progress: finding offset
+	totalSamples := int64(finalSampleCount)
+	reporter := opts.Reporter
+	if reporter != nil {
+		reporter.Start(totalSamples, layout.AudioTracks, opts.InputPath)
+		reporter.ForceUpdate(0, 0, "Finding offset...")
+	}
+
+	// Find the correct offset (syndrome-based is fast, falls back to CRC)
+	offset := findOffset(proc, entry, ctdbSyndrome, stride, laststride)
 	result.Offset = offset
 
 	// Get local syndrome at the detected offset
 	localSyn := proc.Parity().SyndromeWithOffset(offset, len(ctdbSyndrome))
 	if localSyn == nil {
+		if reporter != nil {
+			reporter.Finish()
+		}
 		return nil, fmt.Errorf("failed to get local syndrome at offset %d", offset)
+	}
+
+	// Report progress: calculating corrections
+	if reporter != nil {
+		reporter.ForceUpdate(totalSamples/10, 0, "Calculating corrections...")
 	}
 
 	// Calculate corrections using RS decoder + Forney
@@ -60,6 +76,9 @@ func Execute(
 		localSyn, ctdbSyndrome, stride, strideCount, pregap16bit, offset)
 
 	if err != nil {
+		if reporter != nil {
+			reporter.Finish()
+		}
 		result.CanRepair = false
 		result.ErrorMessage = err.Error()
 		return result, err
@@ -70,6 +89,10 @@ func Execute(
 
 	// If no errors, nothing to repair
 	if errorCount == 0 {
+		if reporter != nil {
+			reporter.ForceUpdate(totalSamples, 0, "No errors found")
+			reporter.Finish()
+		}
 		result.CanRepair = true
 		result.Success = true
 		return result, nil
@@ -86,15 +109,27 @@ func Execute(
 
 	// If dry-run, stop here
 	if opts.DryRun {
+		if reporter != nil {
+			reporter.ForceUpdate(totalSamples, 0, "Dry run complete")
+			reporter.Finish()
+		}
 		return result, nil
 	}
 
 	// Apply corrections and write output
-	err = ApplyCorrections(ctx, opts.InputPath, opts.OutputDir, corrections, layout, opts)
+	err = ApplyCorrections(ctx, opts.InputPath, opts.OutputDir, corrections, layout, opts, reporter)
 	if err != nil {
+		if reporter != nil {
+			reporter.Finish()
+		}
 		result.Success = false
 		result.ErrorMessage = err.Error()
 		return result, err
+	}
+
+	if reporter != nil {
+		reporter.ForceUpdate(totalSamples, layout.AudioTracks, "Repair complete")
+		reporter.Finish()
 	}
 
 	result.Success = true
@@ -127,8 +162,8 @@ func AnalyzeEntry(
 	strideCount := ((finalSampleCount - pregap) * 2) / stride - 2
 	pregap16bit := pregap * 2
 
-	// Find the correct offset
-	offset := findOffset(proc, entry, stride, laststride)
+	// Find the correct offset (syndrome-based is fast, falls back to CRC)
+	offset := findOffset(proc, entry, ctdbSyndrome, stride, laststride)
 	candidate.Offset = offset
 
 	// Get local syndrome at the detected offset
@@ -185,12 +220,98 @@ func AnalyzeEntry(
 	return candidate, nil
 }
 
-// findOffset searches for the matching drive offset by comparing disc CRC.
-func findOffset(proc *accuraterip.Processor, entry *network.CTDBEntry, stride, laststride int) int {
+// findOffset searches for the matching drive offset.
+// It uses syndrome-based detection first (fast), then falls back to CRC-based (slow).
+//
+// Offset handling in CTDB repair:
+// - CTDB is offset-free: parity data represents the "correct" audio at offset 0
+// - Different drives have different read offsets (typically -600 to +700 samples)
+// - We detect the offset to align our local syndrome with CTDB syndrome
+// - Corrections are calculated in offset-adjusted space, then applied to original positions
+// - The output audio has the SAME LENGTH as input - we don't shift audio, only fix errors
+func findOffset(proc *accuraterip.Processor, entry *network.CTDBEntry, ctdbSyndrome [][]uint16, stride, laststride int) int {
+	// Try syndrome-based detection first (fast O(npar) per offset vs O(samples) for CRC)
+	if ctdbSyndrome != nil && proc.Parity() != nil {
+		if offset := findOffsetBySyndrome(proc, ctdbSyndrome, stride, entry.Npar); offset != 0 {
+			return offset
+		}
+		// Syndrome-based found offset 0, verify it's correct using CRC
+		if proc.DiscCTDBCRC(0, stride, laststride) == entry.CRC32 {
+			return 0
+		}
+	}
+
+	// Fall back to CRC-based detection (slow but works without syndrome data)
+	return findOffsetByCRC(proc, entry.CRC32, stride, laststride)
+}
+
+// findOffsetBySyndrome searches for offset by comparing syndrome first row.
+// This is much faster than CRC-based search: O(npar) per offset instead of O(samples).
+// It uses fast single-row comparison (O(npar) per offset) instead of full syndrome (O(stride × npar²)).
+// This mirrors CUETools CDRepair.cs FindOffset which only checks the first syndrome row.
+func findOffsetBySyndrome(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, stride, npar int) int {
+	parityState := proc.Parity()
+	if parityState == nil || ctdbSyndrome == nil || len(ctdbSyndrome) == 0 {
+		return 0
+	}
+
+	strideHalf := stride / 2
+	ctdbFirstRow := ctdbSyndrome[0]
+
+	// First try offset 0 (most common case)
+	localRow := parityState.SyndromeFirstRow(0)
+	if localRow != nil && firstRowMatch(localRow, ctdbFirstRow, npar) {
+		return 0
+	}
+
+	// Search for matching offset in range [-(stride/2)+1, (stride/2)-1]
+	// CUETools: for (int offset = 1 - stride / 2; offset < stride / 2; offset++)
+	for offset := 1 - strideHalf; offset < strideHalf; offset++ {
+		if offset == 0 {
+			continue
+		}
+		// CUETools uses -offset for syndrome lookup
+		localRow := parityState.SyndromeFirstRow(-offset)
+		if localRow == nil {
+			continue
+		}
+		if firstRowMatch(localRow, ctdbFirstRow, npar) {
+			return offset
+		}
+	}
+
+	return 0
+}
+
+// firstRowMatch checks if two syndrome first rows match (XOR is all zeros).
+// This is O(npar) instead of O(stride × npar) for full syndrome match.
+func firstRowMatch(local, ctdb []uint16, npar int) bool {
+	for j := 0; j < npar && j < len(ctdb) && j < len(local); j++ {
+		if local[j]^ctdb[j] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// syndromeMatch checks if two syndromes match (XOR is all zeros).
+func syndromeMatch(local, ctdb [][]uint16, npar int) bool {
+	for i := 0; i < len(ctdb) && i < len(local); i++ {
+		for j := 0; j < npar && j < len(ctdb[i]) && j < len(local[i]); j++ {
+			if local[i][j]^ctdb[i][j] != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// findOffsetByCRC searches for offset by comparing disc CRC (slow fallback).
+func findOffsetByCRC(proc *accuraterip.Processor, expectedCRC uint32, stride, laststride int) int {
 	strideHalf := stride / 2
 
 	// First try offset 0
-	if proc.DiscCTDBCRC(0, stride, laststride) == entry.CRC32 {
+	if proc.DiscCTDBCRC(0, stride, laststride) == expectedCRC {
 		return 0
 	}
 
@@ -199,7 +320,7 @@ func findOffset(proc *accuraterip.Processor, entry *network.CTDBEntry, stride, l
 		if offset == 0 {
 			continue
 		}
-		if proc.DiscCTDBCRC(offset, stride, laststride) == entry.CRC32 {
+		if proc.DiscCTDBCRC(offset, stride, laststride) == expectedCRC {
 			return offset
 		}
 	}

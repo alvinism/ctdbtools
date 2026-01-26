@@ -76,6 +76,44 @@ func Bytes2Syndrome(stride, npar int, parity []byte) [][]uint16 {
 	return syn
 }
 
+// Parity2SyndromeRow computes a single syndrome row for fast offset detection.
+// This is O(npar²) instead of O(stride × npar²) for full syndrome computation.
+// row is the row index (0-based), offset adjusts for drive offset.
+// This mirrors CUETools GetSyndrome(npar, 1, -offset) used in FindOffset.
+func Parity2SyndromeRow(row, stride2, npar, npar2 int, parity []byte, pos, offset int) []uint16 {
+	if npar > npar2 {
+		return nil
+	}
+	// Check that parity buffer is large enough
+	requiredLen := pos + stride2*npar2*2
+	if len(parity) < requiredLen {
+		return nil
+	}
+
+	syn := make([]uint16, npar)
+
+	// Compute syndrome for single row
+	y1 := (row - offset + stride2) % stride2
+	rowBase := pos + y1*npar2*2
+	for x1 := 0; x1 < npar2; x1++ {
+		idx := rowBase + x1*2
+		if idx+1 >= len(parity) {
+			continue // Bounds safety
+		}
+		lo := uint16(parity[idx])
+		hi := uint16(parity[idx+1])
+		if lo == 0 && hi == 0 {
+			continue
+		}
+		val := lo | hi<<8
+		llo := int(Galois16.logTbl[val]) + 0xffff
+		for x := 0; x < npar; x++ {
+			syn[x] ^= Galois16.expTbl[llo-(1+x1)*x]
+		}
+	}
+	return syn
+}
+
 // Parity2Syndrome converts parity (with stride2/npar2) into a reduced syndrome (stride/npar), with optional row offset.
 func Parity2Syndrome(stride, stride2, npar, npar2 int, parity []byte, pos, offset int) [][]uint16 {
 	if npar > npar2 || stride > stride2 {

@@ -72,6 +72,12 @@ func (p *ParityAggregator) SyndromeWithOffset(offset int, strides int) [][]uint1
 	return p.state.SyndromeWithOffset(offset, strides)
 }
 
+// SyndromeFirstRow returns only the first syndrome row for fast offset detection.
+// This is O(npar²) per offset instead of O(stride × npar²) for full syndrome.
+func (p *ParityAggregator) SyndromeFirstRow(offset int) []uint16 {
+	return p.state.SyndromeFirstRow(offset)
+}
+
 // State returns the underlying ParityState for advanced access.
 func (p *ParityAggregator) State() *ParityState {
 	return p.state

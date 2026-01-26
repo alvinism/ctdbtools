@@ -550,6 +550,7 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	}
 	fmt.Printf("CTDB TOC: %s\n", tocStr)
 	fmt.Printf("CTDB: Found %d entries (total confidence: %d)\n", len(resp.Entries), resp.Total)
+	fmt.Printf("Processing CTDB entries...")
 
 	// Per-track confidence tracking
 	trackMatches := make([]int, layout.AudioTracks)     // Exact matches
@@ -561,6 +562,26 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	pregap := 0
 	if len(layout.Tracks) > 0 {
 		pregap = layout.Tracks[0].Pregap * 588
+	}
+
+	// Offset cache to avoid redundant CRC-based offset searches
+	// Key: entry CRC32, Value: detected offset
+	type offsetCacheKey struct {
+		crc        uint32
+		stride     int
+		laststride int
+	}
+	offsetCache := make(map[offsetCacheKey]int)
+
+	// getCachedOffset retrieves offset from cache or computes it
+	getCachedOffset := func(crc uint32, stride, laststride int) int {
+		key := offsetCacheKey{crc, stride, laststride}
+		if cached, ok := offsetCache[key]; ok {
+			return cached
+		}
+		offset := findCTDBOffsetByCRC(proc, crc, stride, laststride)
+		offsetCache[key] = offset
+		return offset
 	}
 
 	// Track best match for displaying detected offset
@@ -575,7 +596,7 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 		stride := entry.Stride
 		laststride := stride + ((finalSampleCount-pregap)*2)%stride
-		offset := findCTDBOffsetByCRC(proc, entry.CRC32, stride, laststride)
+		offset := getCachedOffset(entry.CRC32, stride, laststride)
 		if proc.DiscCTDBCRC(offset, stride, laststride) == entry.CRC32 {
 			if entry.Confidence > bestConfidence {
 				bestOffset = offset
@@ -592,16 +613,10 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		stride := entry.Stride
 		laststride := stride + ((finalSampleCount-pregap)*2)%stride
 
-		// Find matching offset by disc CRC for this entry
-		offset := findCTDBOffsetByCRC(proc, entry.CRC32, stride, laststride)
-
-		// For parity comparison, use the best detected offset if this entry's CRC doesn't match
-		parityOffset := offset
-		if proc.DiscCTDBCRC(offset, stride, laststride) != entry.CRC32 && bestConfidence > 0 {
-			// This entry's CRC doesn't match at any offset, but we have a known good offset
-			// Use the best offset for parity comparison (the entry may have errors)
-			parityOffset = bestOffset
-		}
+		// Offset detection is deferred until we know if we have syndrome data
+		// (syndrome-based is much faster than CRC-based)
+		var offset int
+		var offsetDetected bool
 
 		totalConfidence += entry.Confidence
 
@@ -625,6 +640,9 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		if entry.HasParity != "" && proc.Parity() != nil {
 			ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
 			if err == nil && ctdbSyndrome != nil {
+				// Use fast syndrome-based offset detection (O(npar) per offset vs O(samples) for CRC)
+				offset = findCTDBOffset(proc, ctdbSyndrome, stride, entry.Npar)
+				offsetDetected = true
 				// strideCount = number of data strides, excluding lead-in/out
 				// The -2 accounts for first and last strides being excluded
 				// This matches CueTools CDRepair.cs:30
@@ -632,15 +650,15 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 				pregap16bit := pregap * 2
 
 				// Build list of offsets to try, in priority order:
-				// 1. This entry's detected offset (from CRC matching)
+				// 1. This entry's detected offset (from syndrome matching - already accurate)
 				// 2. Best offset from any matching entry (handles cross-offset comparison)
 				// 3. Offset 0 (most common case)
 				offsetsToTry := []int{}
 				if offset != 0 {
 					offsetsToTry = append(offsetsToTry, offset)
 				}
-				if parityOffset != 0 && parityOffset != offset {
-					offsetsToTry = append(offsetsToTry, parityOffset)
+				if bestOffset != 0 && bestOffset != offset {
+					offsetsToTry = append(offsetsToTry, bestOffset)
 				}
 				offsetsToTry = append(offsetsToTry, 0)
 
@@ -775,6 +793,11 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			continue
 		}
 
+		// Fall back to CRC-based offset detection if not already detected
+		if !offsetDetected {
+			offset = getCachedOffset(entry.CRC32, stride, laststride)
+		}
+
 		// Check CRC matching at found offset
 		trackCRCMatches := make([]bool, layout.AudioTracks)
 		allTracksMatch := true
@@ -833,12 +856,14 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 		stride := entry.Stride
 		laststride := stride + ((finalSampleCount-pregap)*2)%stride
-		offset := findCTDBOffsetByCRC(proc, entry.CRC32, stride, laststride)
+		offset := getCachedOffset(entry.CRC32, stride, laststride)
 		if proc.DiscCTDBCRC(offset, stride, laststride) == entry.CRC32 {
 			discMatched = true
 			break
 		}
 	}
+
+	fmt.Println(" done.")
 
 	// Display per-track CTDB verification status (CueTools format)
 	fmt.Println("Track | CTDB Status")
@@ -946,47 +971,52 @@ func findCTDBOffsetByCRC(proc *accuraterip.Processor, expectedCRC uint32, stride
 	return 0 // No match found (rip may have errors, or disc not in database at any offset)
 }
 
-// findCTDBOffset searches for the matching drive offset by comparing local syndrome with CTDB syndrome.
+// findCTDBOffset searches for the matching drive offset by comparing local syndrome first row with CTDB syndrome.
 // Returns 0 if no syndrome data is available or no match is found.
-// This implements the CueTools FindOffset algorithm: search offsets from -stride/2+1 to +stride/2-1
-// and find where the XOR of local and CTDB syndromes is all zeros.
-// Note: This requires full parity data to work properly; the inline syndrome in CTDB XML is often insufficient.
+// This implements the CueTools FindOffset algorithm: search offsets from -stride/2+1 to +stride/2-1.
+// Uses fast single-row comparison (O(npar) per offset) instead of full syndrome (O(stride × npar²)).
 func findCTDBOffset(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, stride, npar int) int {
-	parity := proc.Parity()
-	if parity == nil {
-		return 0
-	}
-	if ctdbSyndrome == nil {
+	parityState := proc.Parity()
+	if parityState == nil || ctdbSyndrome == nil || len(ctdbSyndrome) == 0 {
 		return 0
 	}
 
-	// CueTools searches from 1 - stride/2 to stride/2 - 1
 	strideHalf := stride / 2
-	strides := len(ctdbSyndrome) // Number of stride positions
+	ctdbFirstRow := ctdbSyndrome[0]
 
 	// First try offset 0 (most common case)
-	localSyn := parity.SyndromeWithOffset(0, strides)
-	if localSyn != nil && syndromeMatch(localSyn, ctdbSyndrome, npar) {
+	localRow := parityState.SyndromeFirstRow(0)
+	if localRow != nil && firstRowMatch(localRow, ctdbFirstRow, npar) {
 		return 0
 	}
 
-	// Search for matching offset
+	// Search for matching offset in range [-(stride/2)+1, (stride/2)-1]
 	for offset := 1 - strideHalf; offset < strideHalf; offset++ {
 		if offset == 0 {
-			continue // already checked
-		}
-		// Get local syndrome at this offset (note: CueTools uses -offset)
-		localSyn := parity.SyndromeWithOffset(-offset, strides)
-		if localSyn == nil {
 			continue
 		}
-
-		if syndromeMatch(localSyn, ctdbSyndrome, npar) {
+		// CUETools uses -offset for syndrome lookup
+		localRow := parityState.SyndromeFirstRow(-offset)
+		if localRow == nil {
+			continue
+		}
+		if firstRowMatch(localRow, ctdbFirstRow, npar) {
 			return offset
 		}
 	}
 
 	return 0 // No match found
+}
+
+// firstRowMatch checks if two syndrome first rows match (XOR is all zeros).
+// This is O(npar) instead of O(stride × npar) for full syndrome match.
+func firstRowMatch(local, ctdb []uint16, npar int) bool {
+	for j := 0; j < npar && j < len(ctdb) && j < len(local); j++ {
+		if local[j]^ctdb[j] != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // syndromeMatch checks if two syndromes match (XOR is all zeros)
@@ -1486,6 +1516,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	// Filter entries with parity data
+	fmt.Printf("Analyzing %d CTDB entries for parity data...", len(resp.Entries))
 	var candidates []*repair.RepairCandidate
 	for i, entry := range resp.Entries {
 		if entry.HasParity == "" {
@@ -1510,6 +1541,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 
 		candidates = append(candidates, candidate)
 	}
+	fmt.Println(" done.")
 
 	if len(candidates) == 0 {
 		return fmt.Errorf("no CTDB entries with parity data found")
@@ -1604,6 +1636,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		Force:        opts.Force,
 		Verbose:      opts.Verbose,
 		ShowProgress: opts.ShowProgress,
+		Reporter:     reporter,
 	}
 
 	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)

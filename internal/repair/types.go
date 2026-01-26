@@ -15,6 +15,7 @@ package repair
 import (
 	"ctdbtools/internal/network"
 	"ctdbtools/internal/parity"
+	"ctdbtools/internal/progress"
 	"ctdbtools/internal/toc"
 )
 
@@ -136,4 +137,7 @@ type RepairOptions struct {
 
 	// Show progress bar
 	ShowProgress bool
+
+	// Progress reporter for status updates
+	Reporter *progress.Reporter
 }

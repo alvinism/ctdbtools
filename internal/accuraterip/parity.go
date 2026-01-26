@@ -185,6 +185,59 @@ func (ps *ParityState) Syndrome() [][]uint16 {
 	return parity.Parity2Syndrome(ps.Stride, ps.Stride, ps.MaxNpar, ps.MaxNpar, ps.ParityBuf, 0, 0)
 }
 
+// SyndromeFirstRow returns only the first syndrome row for fast offset detection.
+// This is O(npar²) per offset instead of O(stride × npar²) for full syndrome.
+// This mirrors CUETools GetSyndrome(npar, 1, -offset) used in FindOffset.
+func (ps *ParityState) SyndromeFirstRow(offset int) []uint16 {
+	// Check offset is within buffer bounds
+	maxOffset := len(ps.leadIn) / 4
+	if offset > maxOffset || offset < -maxOffset {
+		return nil
+	}
+
+	// Compute just row 0 with offset adjustment
+	syn := parity.Parity2SyndromeRow(0, ps.Stride, ps.MaxNpar, ps.MaxNpar, ps.ParityBuf, 0, -offset*2)
+	if syn == nil {
+		return nil
+	}
+
+	g := parity.Galois16
+
+	// Apply lead-in/lead-out adjustment for row 0 only
+	part2 := 0
+	part := (part2 + offset*2 + ps.Stride) % ps.Stride
+	if part < 0 {
+		part += ps.Stride
+	}
+
+	if part < offset*2 {
+		leadOutIdx := ps.LastStride - part - 1
+		leadInIdx := ps.Stride + part
+		if leadOutIdx >= 0 && leadOutIdx < len(ps.leadOut) && leadInIdx >= 0 && leadInIdx < len(ps.leadIn) {
+			for i := 0; i < ps.MaxNpar; i++ {
+				synI := int(syn[i])
+				synI = g.MulExp(synI, i)
+				synI ^= int(ps.leadOut[leadOutIdx]) ^ g.MulExp(int(ps.leadIn[leadInIdx]), (i*ps.strideCount)%g.MaxVal())
+				syn[i] = uint16(synI)
+			}
+		}
+	}
+	if part >= ps.Stride+offset*2 {
+		leadOutIdx := ps.LastStride + ps.Stride - part - 1
+		leadInIdx := part
+		if leadOutIdx >= 0 && leadOutIdx < len(ps.leadOut) && leadInIdx >= 0 && leadInIdx < len(ps.leadIn) {
+			for i := 0; i < ps.MaxNpar; i++ {
+				synI := int(syn[i])
+				synI ^= int(ps.leadOut[leadOutIdx]) ^ g.MulExp(int(ps.leadIn[leadInIdx]), (i*ps.strideCount)%g.MaxVal())
+				synI = g.DivExp(synI, i)
+				syn[i] = uint16(synI)
+			}
+		}
+	}
+
+	return syn
+}
+
 // SyndromeWithOffset adjusts syndrome for drive offset using lead-in/out buffers.
 // This mirrors CueTools AccurateRipVerify.GetSyndrome.
 //
