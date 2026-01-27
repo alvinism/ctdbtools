@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ctdbtools/internal/accuraterip"
@@ -20,6 +21,83 @@ import (
 	"ctdbtools/internal/toc"
 	"ctdbtools/internal/version"
 )
+
+// ctdbResult holds the async CTDB lookup result.
+type ctdbResult struct {
+	resp *network.CTDBResponse
+	err  error
+}
+
+// startCTDBQuery launches CTDB lookup in background goroutine.
+// This allows the CTDB network request to run concurrently with audio decoding.
+func startCTDBQuery(ctx context.Context, tocStr string) <-chan ctdbResult {
+	ch := make(chan ctdbResult, 1)
+	go func() {
+		httpClient := network.NewHTTPClient()
+		ctdbClient := network.NewCTDBClient(httpClient)
+		resp, err := ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
+			TOC:            tocStr,
+			CTDB:           true,
+			Fuzzy:          false,
+			MetadataSearch: network.CTDBMetadataSearchNone,
+		})
+		ch <- ctdbResult{resp: resp, err: err}
+	}()
+	return ch
+}
+
+// fetchParityParallel fetches parity for multiple entries concurrently.
+// Returns a map of entry index to syndrome data.
+func fetchParityParallel(ctx context.Context, client network.CTDBClient,
+	entries []network.CTDBEntry, maxConcurrent int) map[int][][]uint16 {
+
+	results := make(map[int][][]uint16)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrent) // limit concurrency
+
+	for i, entry := range entries {
+		if entry.HasParity == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int, e network.CTDBEntry) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire
+			defer func() { <-sem }() // release
+
+			syndrome, err := client.FetchParity(ctx, &e, e.Npar)
+			if err == nil && syndrome != nil {
+				mu.Lock()
+				results[idx] = syndrome
+				mu.Unlock()
+			}
+		}(i, entry)
+	}
+	wg.Wait()
+	return results
+}
+
+// processCTDBResult handles the async CTDB lookup result.
+// This is called after audio processing completes to process the pre-fetched CTDB response.
+func processCTDBResult(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, result ctdbResult, verbose bool) error {
+	tocID, tocErr := layout.TOCID()
+
+	if result.err != nil {
+		if result.err == network.ErrNotFound {
+			// Print TOCID with "not found" status
+			if tocErr != nil {
+				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
+			} else {
+				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
+			}
+			return nil
+		}
+		return result.err
+	}
+
+	return processCTDBResponse(ctx, layout, proc, result.resp, verbose)
+}
 
 // VerifyOptions holds parameters for a verify run.
 type VerifyOptions struct {
@@ -142,6 +220,13 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 		lastStride = opts.Stride + ((finalSampleCount-pregap)*2)%opts.Stride
 	}
 
+	// Start CTDB query in background (runs concurrently with audio decoding)
+	// This overlaps network I/O with CPU-bound audio processing for ~2s savings
+	var ctdbCh <-chan ctdbResult
+	if opts.QueryCTDB {
+		ctdbCh = startCTDBQuery(ctx, layout.TOCString())
+	}
+
 	// Create progress reporter if enabled
 	var reporter *progress.Reporter
 	if opts.ShowProgress {
@@ -224,8 +309,10 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	}
 
 	// Query CTDB first (matches CueTools output order)
-	if opts.QueryCTDB {
-		if err := queryCTDB(ctx, layout, proc, opts.Verbose); err != nil {
+	// Wait for async CTDB result (started before audio processing)
+	if opts.QueryCTDB && ctdbCh != nil {
+		ctdbRes := <-ctdbCh
+		if err := processCTDBResult(ctx, layout, proc, ctdbRes, opts.Verbose); err != nil {
 			// Print TOCID with error status
 			tocID, tocErr := layout.TOCID()
 			if tocErr != nil {
@@ -542,6 +629,15 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		return err
 	}
 
+	return processCTDBResponse(ctx, layout, proc, resp, verbose)
+}
+
+// processCTDBResponse processes a CTDB response and displays results.
+// This is the core processing logic used by both queryCTDB (sync) and processCTDBResult (async).
+func processCTDBResponse(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, resp *network.CTDBResponse, verbose bool) error {
+	tocStr := layout.TOCString()
+	tocID, tocErr := layout.TOCID()
+
 	// Print TOCID with "found" status
 	if tocErr != nil {
 		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
@@ -550,6 +646,10 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	}
 	fmt.Printf("CTDB TOC: %s\n", tocStr)
 	fmt.Printf("CTDB: Found %d entries (total confidence: %d)\n", len(resp.Entries), resp.Total)
+
+	// Create CTDB client for parity fetches
+	httpClient := network.NewHTTPClient()
+	ctdbClient := network.NewCTDBClient(httpClient)
 
 	// Per-track confidence tracking
 	trackMatches := make([]int, layout.AudioTracks)     // Exact matches
@@ -604,10 +704,7 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 	}
 
-	entryCount := len(resp.Entries)
-	for i, entry := range resp.Entries {
-		fmt.Printf("\rProcessing CTDB entries... %d/%d", i+1, entryCount)
-
+	for _, entry := range resp.Entries {
 		if len(entry.TrackCRCs) != layout.AudioTracks {
 			continue // skip entries with wrong track count
 		}
@@ -849,10 +946,6 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			}
 		}
 	}
-
-	// Clear progress line and show done message
-	fmt.Print("\r                                    \r")
-	fmt.Println("Processing CTDB entries... done.")
 
 	// Check disc CRC match status
 	discMatched := false
@@ -1459,6 +1552,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		sampleCache = ingest.NewSampleCache(int64(finalSampleCount))
 	}
 
+	// Start CTDB query in background (runs concurrently with audio decoding)
+	// This overlaps network I/O with CPU-bound audio processing for ~2s savings
+	ctdbCh := startCTDBQuery(ctx, layout.TOCString())
+
 	// Create progress reporter
 	var reporter *progress.Reporter
 	if opts.ShowProgress {
@@ -1494,23 +1591,12 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		return fmt.Errorf("failed to process audio: %w", err)
 	}
 
-	// Query CTDB
-	fmt.Println("Querying CTDB for parity data...")
-
-	tocStr := layout.TOCString()
+	// Wait for CTDB query result (started before audio processing)
 	tocID, tocErr := layout.TOCID()
 
-	httpClient := network.NewHTTPClient()
-	ctdbClient := network.NewCTDBClient(httpClient)
-
-	resp, err := ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
-		TOC:            tocStr,
-		CTDB:           true,
-		Fuzzy:          false,
-		MetadataSearch: network.CTDBMetadataSearchNone,
-	})
-	if err != nil {
-		if err == network.ErrNotFound {
+	ctdbRes := <-ctdbCh
+	if ctdbRes.err != nil {
+		if ctdbRes.err == network.ErrNotFound {
 			if tocErr != nil {
 				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
 			} else {
@@ -1518,8 +1604,9 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 			}
 			return fmt.Errorf("no CTDB entries found for this disc")
 		}
-		return fmt.Errorf("CTDB lookup failed: %w", err)
+		return fmt.Errorf("CTDB lookup failed: %w", ctdbRes.err)
 	}
+	resp := ctdbRes.resp
 
 	if tocErr != nil {
 		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
@@ -1527,21 +1614,27 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
 	}
 
+	// Create HTTP client for parity fetches
+	httpClient := network.NewHTTPClient()
+	ctdbClient := network.NewCTDBClient(httpClient)
+
+	// Fetch parity data in parallel for all entries with parity
+	// This significantly reduces total fetch time when multiple entries have parity
+	const maxParallelFetches = 4
+	parityData := fetchParityParallel(ctx, ctdbClient, resp.Entries, maxParallelFetches)
+
 	// Filter entries with parity data
-	entryCount := len(resp.Entries)
 	var candidates []*repair.RepairCandidate
 	for i, entry := range resp.Entries {
-		fmt.Printf("\rAnalyzing CTDB entries... %d/%d", i+1, entryCount)
-
 		if entry.HasParity == "" {
 			continue
 		}
 
-		// Fetch parity data
-		ctdbSyndrome, err := ctdbClient.FetchParity(ctx, &entry, entry.Npar)
-		if err != nil {
+		// Get pre-fetched parity data
+		ctdbSyndrome, ok := parityData[i]
+		if !ok || ctdbSyndrome == nil {
 			if opts.Verbose {
-				fmt.Printf("  Skipping entry %d: failed to fetch parity: %v\n", i+1, err)
+				fmt.Printf("Skipping entry %d: failed to fetch parity\n", i+1)
 			}
 			continue
 		}
@@ -1555,8 +1648,6 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 
 		candidates = append(candidates, candidate)
 	}
-	fmt.Print("\r                                    \r")
-	fmt.Println("Analyzing CTDB entries... done.")
 
 	if len(candidates) == 0 {
 		return fmt.Errorf("no CTDB entries with parity data found")

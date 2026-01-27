@@ -25,7 +25,9 @@ func CheckDependencies() error {
 // PCMStream invokes ffmpeg to decode an input file to 16-bit stereo PCM @ 44.1kHz, returning a reader.
 func PCMStream(ctx context.Context, input string) (io.ReadCloser, *exec.Cmd, error) {
 	args := []string{
-		"-threads", "0", // Auto-detect optimal thread count
+		"-threads", "0",          // Auto-detect optimal thread count
+		"-probesize", "32768",    // Reduce from 5MB default for faster format detection
+		"-analyzeduration", "500000", // 500ms max analysis time
 		"-v", "quiet",
 		"-i", input,
 		"-f", "s16le",
