@@ -20,6 +20,9 @@ import (
 //
 // The corrections are applied as the audio is streamed, avoiding the need to
 // load the entire file into memory. Corrections must be sorted by position.
+//
+// If opts.SampleCache is provided and populated, uses cached samples instead of
+// re-decoding with FFmpeg (significantly faster).
 func ApplyCorrections(
 	ctx context.Context,
 	inputPath string,
@@ -31,6 +34,7 @@ func ApplyCorrections(
 ) error {
 	// Calculate total samples for progress reporting
 	totalSamples := int64(layout.AudioLengthFrames()) * 588
+
 	// Ensure output directory exists
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
@@ -49,6 +53,12 @@ func ApplyCorrections(
 	}
 	defer writer.Close()
 
+	// Use cached samples if available (avoids second FFmpeg decode pass)
+	if opts.SampleCache != nil && opts.SampleCache.Length() > 0 {
+		return applyCorrectionsCached(ctx, opts.SampleCache, writer, corrections, reporter, totalSamples)
+	}
+
+	// Fall back to FFmpeg-based correction (original path)
 	// Parse CUE to determine if split-track
 	var sheet ingest.CueSheet
 	if filepath.Ext(inputPath) == ".cue" {
@@ -82,6 +92,88 @@ func ApplyCorrections(
 	return applyCorrectionsSingleFile(ctx, audioPath, writer, corrections, reporter, totalSamples)
 }
 
+// applyCorrectionsCached applies corrections using cached samples instead of FFmpeg.
+// This is significantly faster as it avoids a second decode pass.
+func applyCorrectionsCached(
+	ctx context.Context,
+	cache *ingest.SampleCache,
+	writer *audio.WAVWriter,
+	corrections []parity.ErrorCorrection,
+	reporter *progress.Reporter,
+	totalSamples int64,
+) error {
+	reader := cache.Reader()
+	buf := make([]uint32, 16384)
+
+	corrIdx := 0
+	sampleIdx := 0 // Current stereo sample index
+	lastReportedSample := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		n, err := reader.Read(buf)
+		if n == 0 && err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("read error: %w", err)
+		}
+
+		// Apply corrections to buffer in-place
+		for i := 0; i < n; i++ {
+			// Check if left channel needs correction (16-bit sample index)
+			leftIdx := (sampleIdx + i) * 2
+			if corrIdx < len(corrections) && corrections[corrIdx].Position == leftIdx {
+				// XOR left channel
+				left := uint16(buf[i] & 0xFFFF)
+				left ^= corrections[corrIdx].Magnitude
+				buf[i] = uint32(left) | (buf[i] & 0xFFFF0000)
+				corrIdx++
+			}
+
+			// Check if right channel needs correction (16-bit sample index + 1)
+			rightIdx := (sampleIdx + i) * 2 + 1
+			if corrIdx < len(corrections) && corrections[corrIdx].Position == rightIdx {
+				// XOR right channel
+				right := uint16(buf[i] >> 16)
+				right ^= corrections[corrIdx].Magnitude
+				buf[i] = (buf[i] & 0x0000FFFF) | uint32(right)<<16
+				corrIdx++
+			}
+		}
+
+		// Write entire buffer at once
+		if err := writer.WriteSamplesBulk(buf[:n]); err != nil {
+			return fmt.Errorf("failed to write samples: %w", err)
+		}
+
+		sampleIdx += n
+
+		// Report progress every 100000 samples
+		if reporter != nil && sampleIdx-lastReportedSample >= 100000 {
+			reporter.Update(int64(sampleIdx), 0, "Applying corrections (cached)...")
+			lastReportedSample = sampleIdx
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	// Verify all corrections were applied
+	if corrIdx < len(corrections) {
+		return fmt.Errorf("not all corrections were applied: %d remaining (last applied at position %d, next needed at %d)",
+			len(corrections)-corrIdx, sampleIdx*2, corrections[corrIdx].Position)
+	}
+
+	return nil
+}
+
 // applyCorrectionsSingleFile handles repair for single-file CUE sheets.
 func applyCorrectionsSingleFile(
 	ctx context.Context,
@@ -106,7 +198,7 @@ func applyCorrectionsSingleFile(
 	sampleIdx := 0 // Current stereo sample index
 	lastReportedSample := 0
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 16384)
 
 	for {
 		select {
@@ -236,7 +328,7 @@ func processStreamWithCorrections(
 	lastReportedSample *int,
 	currentTrack int,
 ) error {
-	buf := make([]byte, 4096)
+	buf := make([]byte, 16384)
 
 	for {
 		select {

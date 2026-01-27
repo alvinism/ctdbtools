@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 // Implements the AudioWriter interface.
 type WAVWriter struct {
 	file       *os.File
+	buf        *bufio.Writer
 	dataSize   uint32
 	headerSize int64
 }
@@ -38,6 +40,7 @@ func NewWAVWriter(path string) (*WAVWriter, error) {
 
 	w := &WAVWriter{
 		file:       file,
+		buf:        bufio.NewWriterSize(file, 256*1024), // 256KB buffer
 		dataSize:   0,
 		headerSize: 44, // Standard WAV header size
 	}
@@ -118,16 +121,14 @@ func (w *WAVWriter) writeHeader(dataSize uint32) error {
 // WriteSample writes a single stereo sample (32-bit packed: L16|R16) to the file.
 // The sample is stored as little-endian with left channel first.
 func (w *WAVWriter) WriteSample(sample uint32) error {
-	// Extract left and right channels
-	left := uint16(sample & 0xFFFF)
-	right := uint16(sample >> 16)
+	// Write 4 bytes directly to buffer (little-endian)
+	var b [4]byte
+	b[0] = byte(sample)
+	b[1] = byte(sample >> 8)
+	b[2] = byte(sample >> 16)
+	b[3] = byte(sample >> 24)
 
-	// Write left channel (little-endian)
-	if err := binary.Write(w.file, binary.LittleEndian, left); err != nil {
-		return err
-	}
-	// Write right channel (little-endian)
-	if err := binary.Write(w.file, binary.LittleEndian, right); err != nil {
+	if _, err := w.buf.Write(b[:]); err != nil {
 		return err
 	}
 
@@ -145,9 +146,32 @@ func (w *WAVWriter) WriteSamples(samples []uint32) error {
 	return nil
 }
 
+// WriteSamplesBulk writes multiple stereo samples efficiently using a pre-allocated buffer.
+// This is faster than WriteSamples for large batches.
+func (w *WAVWriter) WriteSamplesBulk(samples []uint32) error {
+	// Convert samples to bytes in a single pass
+	buf := make([]byte, len(samples)*4)
+	for i, sample := range samples {
+		buf[i*4] = byte(sample)
+		buf[i*4+1] = byte(sample >> 8)
+		buf[i*4+2] = byte(sample >> 16)
+		buf[i*4+3] = byte(sample >> 24)
+	}
+
+	n, err := w.buf.Write(buf)
+	if err != nil {
+		return err
+	}
+	w.dataSize += uint32(n)
+	return nil
+}
+
 // Write16BitSample writes a single 16-bit sample (one channel).
 func (w *WAVWriter) Write16BitSample(sample uint16) error {
-	if err := binary.Write(w.file, binary.LittleEndian, sample); err != nil {
+	var b [2]byte
+	b[0] = byte(sample)
+	b[1] = byte(sample >> 8)
+	if _, err := w.buf.Write(b[:]); err != nil {
 		return err
 	}
 	w.dataSize += 2
@@ -156,7 +180,7 @@ func (w *WAVWriter) Write16BitSample(sample uint16) error {
 
 // WriteBytes writes raw bytes to the data section.
 func (w *WAVWriter) WriteBytes(data []byte) error {
-	n, err := w.file.Write(data)
+	n, err := w.buf.Write(data)
 	if err != nil {
 		return err
 	}
@@ -176,6 +200,12 @@ func (w *WAVWriter) SampleCount() int64 {
 
 // Close finalizes the WAV header with the actual data size and closes the file.
 func (w *WAVWriter) Close() error {
+	// Flush buffered data
+	if err := w.buf.Flush(); err != nil {
+		w.file.Close()
+		return fmt.Errorf("failed to flush buffer: %w", err)
+	}
+
 	// Update header with actual data size
 	if err := w.writeHeader(w.dataSize); err != nil {
 		w.file.Close()

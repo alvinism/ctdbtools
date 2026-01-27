@@ -550,7 +550,6 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 	}
 	fmt.Printf("CTDB TOC: %s\n", tocStr)
 	fmt.Printf("CTDB: Found %d entries (total confidence: %d)\n", len(resp.Entries), resp.Total)
-	fmt.Printf("Processing CTDB entries...")
 
 	// Per-track confidence tracking
 	trackMatches := make([]int, layout.AudioTracks)     // Exact matches
@@ -605,7 +604,10 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 	}
 
-	for _, entry := range resp.Entries {
+	entryCount := len(resp.Entries)
+	for i, entry := range resp.Entries {
+		fmt.Printf("\rProcessing CTDB entries... %d/%d", i+1, entryCount)
+
 		if len(entry.TrackCRCs) != layout.AudioTracks {
 			continue // skip entries with wrong track count
 		}
@@ -848,6 +850,10 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 		}
 	}
 
+	// Clear progress line and show done message
+	fmt.Print("\r                                    \r")
+	fmt.Println("Processing CTDB entries... done.")
+
 	// Check disc CRC match status
 	discMatched := false
 	for _, entry := range resp.Entries {
@@ -862,8 +868,6 @@ func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Process
 			break
 		}
 	}
-
-	fmt.Println(" done.")
 
 	// Display per-track CTDB verification status (CueTools format)
 	fmt.Println("Track | CTDB Status")
@@ -1449,6 +1453,12 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 	lastStride := opts.Stride + ((finalSampleCount-pregap)*2)%opts.Stride
 
+	// Create sample cache if not dry-run (to avoid second FFmpeg pass during correction)
+	var sampleCache *ingest.SampleCache
+	if !opts.DryRun {
+		sampleCache = ingest.NewSampleCache(int64(finalSampleCount))
+	}
+
 	// Create progress reporter
 	var reporter *progress.Reporter
 	if opts.ShowProgress {
@@ -1466,6 +1476,8 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		CalcParity:       true,
 		Progress:         reporter,
 		SeparateDecoding: true,
+		CacheSamples:     sampleCache != nil,
+		SampleCache:      sampleCache,
 	}
 
 	var err error
@@ -1516,9 +1528,11 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	// Filter entries with parity data
-	fmt.Printf("Analyzing %d CTDB entries for parity data...", len(resp.Entries))
+	entryCount := len(resp.Entries)
 	var candidates []*repair.RepairCandidate
 	for i, entry := range resp.Entries {
+		fmt.Printf("\rAnalyzing CTDB entries... %d/%d", i+1, entryCount)
+
 		if entry.HasParity == "" {
 			continue
 		}
@@ -1541,7 +1555,8 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 
 		candidates = append(candidates, candidate)
 	}
-	fmt.Println(" done.")
+	fmt.Print("\r                                    \r")
+	fmt.Println("Analyzing CTDB entries... done.")
 
 	if len(candidates) == 0 {
 		return fmt.Errorf("no CTDB entries with parity data found")
@@ -1637,6 +1652,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		Verbose:      opts.Verbose,
 		ShowProgress: opts.ShowProgress,
 		Reporter:     reporter,
+		SampleCache:  sampleCache,
 	}
 
 	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)

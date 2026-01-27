@@ -24,6 +24,8 @@ type ProcessOptions struct {
 	CalcParity       bool
 	Progress         *progress.Reporter // Optional progress reporter
 	SeparateDecoding bool               // Use separate goroutine for decoding (like CueTools AudioPipe)
+	CacheSamples     bool               // Enable sample caching for reuse (avoids second FFmpeg pass)
+	SampleCache      *SampleCache       // Cache to populate during processing
 }
 
 // ProcessFile decodes an audio file via ffmpeg and feeds PCM into the AccurateRip processor.
@@ -77,7 +79,7 @@ func ProcessFileWithProgress(ctx context.Context, audioPath string, layout toc.L
 	}
 
 	proc := accuraterip.NewProcessor(layout, opts.Stride, opts.LastStride, opts.Npar, opts.CalcParity)
-	buf := make([]uint32, 4096)
+	buf := make([]uint32, 16384)
 
 	// Calculate total samples for progress
 	totalSamples := int64(layout.AudioLengthFrames()) * 588
@@ -109,6 +111,11 @@ func ProcessFileWithProgress(ctx context.Context, audioPath string, layout toc.L
 				proc.Feed(buf[:readN])
 				remaining -= readN
 				samplesProcessed += int64(readN)
+
+				// Cache samples if enabled
+				if opts.CacheSamples && opts.SampleCache != nil {
+					opts.SampleCache.Write(buf[:readN])
+				}
 
 				// Report progress
 				if opts.Progress != nil {
@@ -170,7 +177,7 @@ func ProcessCueSheetWithProgress(ctx context.Context, sheet CueSheet, opts Proce
 	// while Layout is used for TOC/ID calculation
 	audioLayout := sheet.GetAudioLayout()
 	proc := accuraterip.NewProcessor(audioLayout, opts.Stride, opts.LastStride, opts.Npar, opts.CalcParity)
-	buf := make([]uint32, 4096)
+	buf := make([]uint32, 16384)
 
 	// Calculate total samples for progress
 	totalSamples := int64(audioLayout.AudioLengthFrames()) * 588
@@ -214,6 +221,11 @@ func ProcessCueSheetWithProgress(ctx context.Context, sheet CueSheet, opts Proce
 				proc.Feed(buf[:readN])
 				remaining -= readN
 				samplesProcessed += int64(readN)
+
+				// Cache samples if enabled
+				if opts.CacheSamples && opts.SampleCache != nil {
+					opts.SampleCache.Write(buf[:readN])
+				}
 
 				// Report progress
 				if opts.Progress != nil {

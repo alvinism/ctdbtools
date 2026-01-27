@@ -13,6 +13,7 @@
 package repair
 
 import (
+	"ctdbtools/internal/ingest"
 	"ctdbtools/internal/network"
 	"ctdbtools/internal/parity"
 	"ctdbtools/internal/progress"
@@ -140,4 +141,7 @@ type RepairOptions struct {
 
 	// Progress reporter for status updates
 	Reporter *progress.Reporter
+
+	// SampleCache holds cached audio samples from Pass 1 to avoid re-decoding
+	SampleCache *ingest.SampleCache
 }
