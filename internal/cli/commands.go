@@ -1591,10 +1591,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	if len(candidates) == 0 {
-		return fmt.Errorf("no CTDB entries with parity data found")
+		return fmt.Errorf("no CTDB entries found")
 	}
 
-	fmt.Printf("Found %d CTDB entries with parity:\n\n", len(candidates))
+	fmt.Printf("Found %d CTDB entries:\n\n", len(candidates))
 
 	// Display candidates
 	fmt.Println("  #  Confidence  Errors  Error Positions")
@@ -1713,7 +1713,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	for _, tr := range result.TrackResults {
 		status := "OK (no errors)"
 		if tr.ErrorCount > 0 {
-			status = fmt.Sprintf("Repaired %d samples @%s", tr.ErrorCount, tr.Positions)
+			status = fmt.Sprintf("Repaired %d samples", tr.ErrorCount)
 		}
 		fmt.Printf(" %02d   | %s\n", tr.Track, status)
 	}

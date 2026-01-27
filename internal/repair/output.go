@@ -239,10 +239,6 @@ func writeRepairLog(path string, result *RepairResult, layout toc.Layout) error 
 	fmt.Fprintf(f, "Date: %s\n", time.Now().Format("2006/01/02 15:04:05"))
 	fmt.Fprintf(f, "Version: %s\n\n", version.Version)
 
-	// Input/Output
-	fmt.Fprintf(f, "Input:  %s\n", result.InputPath)
-	fmt.Fprintf(f, "Output: %s\n\n", result.OutputDir)
-
 	// CTDB Entry details
 	if result.Entry != nil {
 		fmt.Fprintf(f, "CTDB Entry\n")
@@ -291,29 +287,6 @@ func writeRepairLog(path string, result *RepairResult, layout toc.Layout) error 
 
 	fmt.Fprintf(f, "\n")
 
-	// Correction details (first 100)
-	if len(result.Corrections) > 0 {
-		fmt.Fprintf(f, "Corrections Applied\n")
-		fmt.Fprintf(f, "-------------------\n")
-		fmt.Fprintf(f, "Position (16-bit) | Magnitude | Time\n")
-		fmt.Fprintf(f, "----------------- | --------- | ----\n")
-
-		limit := len(result.Corrections)
-		if limit > 100 {
-			limit = 100
-		}
-
-		for i := 0; i < limit; i++ {
-			c := result.Corrections[i]
-			timeStr := sampleToTimeString(c.Position)
-			fmt.Fprintf(f, "%17d | %04X      | %s\n", c.Position, c.Magnitude, timeStr)
-		}
-
-		if len(result.Corrections) > 100 {
-			fmt.Fprintf(f, "... and %d more corrections\n", len(result.Corrections)-100)
-		}
-	}
-
 	// Error message if failed
 	if result.ErrorMessage != "" {
 		fmt.Fprintf(f, "\nError: %s\n", result.ErrorMessage)
@@ -329,11 +302,4 @@ func framesToMSF(frames int) string {
 	ss := seconds % 60
 	mm := seconds / 60
 	return fmt.Sprintf("%02d:%02d:%02d", mm, ss, ff)
-}
-
-// sampleToTimeString converts a 16-bit sample position to MM:SS:FF format.
-func sampleToTimeString(samples int) string {
-	// 1 frame = 588 stereo samples = 1176 16-bit samples
-	frames := samples / 1176
-	return framesToMSF(frames)
 }

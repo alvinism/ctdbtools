@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -243,9 +244,12 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	// Determine output directory
 	outputDir := repairOutput
 	if outputDir == "" {
-		// Default: <input>_repaired/
-		base := strings.TrimSuffix(inputPath, ".cue")
-		outputDir = base + "_repaired"
+		// Default: _repaired/ inside input directory (or CUE file's directory)
+		if info.IsDir() {
+			outputDir = filepath.Join(inputPath, "_repaired")
+		} else {
+			outputDir = filepath.Join(filepath.Dir(inputPath), "_repaired")
+		}
 	}
 
 	// Setup context with cancellation
