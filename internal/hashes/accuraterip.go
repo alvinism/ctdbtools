@@ -24,15 +24,3 @@ func AccurateRipCRC(crc uint32, sample uint32, sampleIndex int) (uint32, uint32)
 	return crc, crcV2
 }
 
-// OffsetSafeCRC mirrors CUETools' CRCWONULL/CRC32 logic without null samples.
-// TODO: implement full offset handling and null-stripping combination once audio iteration is in place.
-func OffsetSafeCRC(crc uint32, sample uint16) (uint32, int) {
-	if sample == 0 {
-		return crc, 0
-	}
-	b0 := byte(sample)
-	b1 := byte(sample >> 8)
-	crc = (crc >> 8) ^ crc32Table[(crc^uint32(b0))&0xff]
-	crc = (crc >> 8) ^ crc32Table[(crc^uint32(b1))&0xff]
-	return crc, 1
-}

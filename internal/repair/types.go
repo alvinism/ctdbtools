@@ -22,138 +22,61 @@ import (
 
 // RepairResult contains the outcome of a repair operation.
 type RepairResult struct {
-	// Input file path
-	InputPath string
-
-	// Output directory path
-	OutputDir string
-
-	// CTDB entry used for repair
-	Entry *network.CTDBEntry
-
-	// Detected drive offset in samples
-	Offset int
-
-	// Total number of errors found
-	TotalErrors int
-
-	// Corrections to apply (sorted by position)
-	Corrections []parity.ErrorCorrection
-
-	// Per-track repair results
+	InputPath    string
+	OutputDir    string
+	Entry        *network.CTDBEntry
+	Offset       int // Detected drive offset in samples
+	TotalErrors  int
+	Corrections  []parity.ErrorCorrection // Sorted by position
 	TrackResults []TrackRepairResult
-
-	// Whether repair was successful
-	Success bool
-
-	// Whether the errors are correctable
-	CanRepair bool
-
-	// Error message if repair failed
+	Success      bool
+	CanRepair    bool
 	ErrorMessage string
 }
 
 // TrackRepairResult contains repair information for a single track.
 type TrackRepairResult struct {
-	// Track number (1-indexed)
-	Track int
-
-	// Number of errors in this track
+	Track      int // 1-indexed
 	ErrorCount int
-
-	// Error positions formatted as MM:SS:FF
-	Positions string
-
-	// Whether this track was repaired
-	Repaired bool
+	Positions  string // Error positions formatted as MM:SS:FF
+	Repaired   bool
 }
 
 // RepairCandidate represents a CTDB entry that can be used for repair.
 type RepairCandidate struct {
-	// The CTDB entry
-	Entry *network.CTDBEntry
-
-	// Entry index in the response
-	Index int
-
-	// Detected offset for this entry
-	Offset int
-
-	// Number of errors detected
-	ErrorCount int
-
-	// Formatted error positions
+	Entry          *network.CTDBEntry
+	Index          int
+	Offset         int
+	ErrorCount     int
 	ErrorPositions string
-
-	// Whether errors can be corrected
-	CanRepair bool
-
-	// Per-track error counts
-	TrackErrors []int
+	CanRepair      bool
+	TrackErrors    []int
 }
 
 // OutputFiles contains paths to generated output files.
 type OutputFiles struct {
-	// Path to output WAV file (for single-file mode)
-	WAVPath string
-
-	// All output WAV files (supports multiple for split-track mode)
-	WAVPaths []string
-
-	// Path to output CUE file
-	CUEPath string
-
-	// Path to repair log file
-	LogPath string
-
-	// Path to AccurateRip verification file (optional)
+	WAVPath         string   // Single-file mode
+	WAVPaths        []string // Split-track mode
+	CUEPath         string
+	LogPath         string
 	AccurateRipPath string
 }
 
 // RepairOptions configures a repair operation.
 type RepairOptions struct {
-	// Input path (CUE file or directory)
-	InputPath string
-
-	// Output directory path
-	OutputDir string
-
-	// TOC layout from input
-	Layout toc.Layout
-
-	// Parity stride
-	Stride int
-
-	// Number of parity symbols
-	Npar int
-
-	// Auto-select highest confidence entry
-	Auto bool
-
-	// Show what would be repaired without writing
-	DryRun bool
-
-	// Overwrite existing output
-	Force bool
-
-	// Verbose output
-	Verbose bool
-
-	// Show progress bar
-	ShowProgress bool
-
-	// Progress reporter for status updates
-	Reporter *progress.Reporter
-
-	// SampleCache holds cached audio samples from Pass 1 to avoid re-decoding
-	SampleCache *ingest.SampleCache
-
-	// OriginalCuePath is the path to the original CUE file for metadata preservation
-	OriginalCuePath string
-
-	// IsSplitTrack indicates whether input was split-track (multiple source files)
-	IsSplitTrack bool
-
-	// SourceFiles contains original source file paths (for preserving filenames)
-	SourceFiles []string
+	InputPath       string
+	OutputDir       string
+	Layout          toc.Layout
+	Stride          int
+	Npar            int
+	Auto            bool
+	DryRun          bool
+	Force           bool
+	Verbose         bool
+	ShowProgress    bool
+	Reporter        *progress.Reporter
+	SampleCache     *ingest.SampleCache // Cached samples from Pass 1 to avoid re-decoding
+	OriginalCuePath string              // Path to original CUE file for metadata preservation
+	IsSplitTrack    bool
+	SourceFiles     []string // Original source file paths for preserving filenames
 }

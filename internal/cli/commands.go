@@ -52,12 +52,12 @@ func startCTDBQuery(ctx context.Context, tocStr string) <-chan ctdbResult {
 	return ch
 }
 
-// startParityFetchWithNotification launches parity fetching in background, chained off CTDB result.
+// startParityFetch launches parity fetching in background, chained off CTDB result.
 // Returns two channels:
 // - ctdbNotifyCh: sends CTDB result as soon as lookup completes (for immediate "found" message)
 // - parityCh: sends parity data when all fetches complete
 // This allows printing "found CTDB ID" immediately while parity fetch continues in background.
-func startParityFetchWithNotification(ctx context.Context, ctdbCh <-chan ctdbResult) (<-chan ctdbResult, <-chan parityResult) {
+func startParityFetch(ctx context.Context, ctdbCh <-chan ctdbResult) (<-chan ctdbResult, <-chan parityResult) {
 	ctdbNotifyCh := make(chan ctdbResult, 1)
 	parityCh := make(chan parityResult, 1)
 
@@ -234,21 +234,8 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	}
 
 	// Compute lastStride if not explicitly set (-1 sentinel means auto-compute).
-	//
-	// LastStride determines how many samples to exclude from the end of the last track.
-	// It's computed dynamically to ensure the total verified data length is a multiple
-	// of stride (required for CTDB parity alignment).
-	//
-	// CueTools formula (CDRepair.cs:29):
-	//   laststride = stride + ((finalSampleCount - pregap) * 2) % stride
-	//
-	// Where:
-	//   - stride = 588 * 10 * 2 = 11760 (10 CD frames × 2 channels, in 16-bit samples)
-	//   - finalSampleCount = total stereo samples (32-bit values)
-	//   - pregap = pregap of first audio track in samples
-	//   - "* 2" converts stereo samples to 16-bit channel samples
-	//
-	// The suffix samples excluded = laststride / 2 (converted back to stereo samples)
+	// LastStride excludes samples from the end so total length is stride-aligned.
+	// Formula: laststride = stride + ((finalSampleCount - pregap) * 2) % stride
 	lastStride := opts.LastStride
 	if lastStride < 0 {
 		finalSampleCount := layout.AudioLengthFrames() * 588
@@ -618,58 +605,6 @@ type trackErrorInfo struct {
 	positions  string // formatted as MM:SS:FF-MM:SS:FF
 }
 
-// getTrackSampleRange returns the sample range [min, max) for a track in 16-bit samples.
-// This matches CueTools convention where positions are relative to first audio track start.
-func getTrackSampleRange(layout toc.Layout, track int) (min, max int) {
-	firstTrackStart := layout.TrackStartFrame(1)
-	trackStart := layout.TrackStartFrame(track)
-	trackEnd := trackStart + layout.TrackLengthFrames(track)
-
-	// Convert frames to 16-bit samples (1 frame = 588 stereo = 1176 16-bit)
-	// CueTools uses: (tri.Start - tr0.Start) * 588 and (tri.End + 1 - tr0.Start) * 588
-	// where values are in stereo samples, but parity uses 16-bit samples (* 2)
-	min = (trackStart - firstTrackStart) * 588 * 2
-	max = (trackEnd - firstTrackStart) * 588 * 2
-	return min, max
-}
-
-// queryCTDB queries the CUETools Database and displays results.
-//
-// CTDB Verification Algorithm (matches CueTools CUEToolsDB.cs):
-// 1. Query CTDB server with TOC string to get entries
-// 2. For each entry, try 3-case confidence matching:
-//    a) Case 1: Exact CRC match (!hasErrors) - add full confidence
-//    b) Case 2: Recoverable entry (canRecover) - check per-track error boundaries
-//    c) Case 3: No parity, has trackcrcs - search offsets for per-track CRC match
-// 3. Aggregate matches and display per-track status with "differs" info
-func queryCTDB(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, verbose bool) error {
-	tocStr := layout.TOCString()
-	tocID, tocErr := layout.TOCID()
-
-	httpClient := network.NewHTTPClient()
-	ctdbClient := network.NewCTDBClient(httpClient)
-
-	resp, err := ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
-		TOC:            tocStr,
-		CTDB:           true,
-		Fuzzy:          false,
-		MetadataSearch: network.CTDBMetadataSearchNone,
-	})
-	if err != nil {
-		if err == network.ErrNotFound {
-			// Print TOCID with "not found" status
-			if tocErr != nil {
-				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
-			} else {
-				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
-			}
-			return nil
-		}
-		return err
-	}
-
-	return processCTDBResponse(ctx, layout, proc, resp, verbose)
-}
 
 // processCTDBResponse processes a CTDB response and displays results.
 // This is the core processing logic used by both queryCTDB (sync) and processCTDBResult (async).
@@ -901,7 +836,7 @@ func processCTDBResponse(ctx context.Context, layout toc.Layout, proc *accurater
 					} else {
 						// Entry is recoverable - check per-track error boundaries
 						for track := 1; track <= layout.AudioTracks; track++ {
-							trackMin, trackMax := getTrackSampleRange(layout, track)
+							trackMin, trackMax := repair.GetTrackSampleRange(layout, track)
 							errorsInTrack := parity.GetAffectedSectorsCountWithBounds(
 								errPositions, trackMin, trackMax,
 								pregap16bit, stride, laststride, finalSampleCount, matchOffset)
@@ -1065,25 +1000,9 @@ func processCTDBResponse(ctx context.Context, layout toc.Layout, proc *accurater
 	return nil
 }
 
-// findCTDBOffsetByCRC searches for the matching drive offset by comparing disc CRC.
-//
-// CD drives have different read offsets (typically -600 to +700 samples). When a disc
-// is ripped, the samples are shifted by this offset. CTDB stores CRCs computed at a
-// reference offset (usually 0), and we need to find what offset makes our local CRC
-// match the expected CRC.
-//
-// Algorithm (based on CueTools CDRepair.cs FindOffset):
-//  1. Try offset 0 first (most common case - offset already corrected during rip)
-//  2. Search from -(stride/2)+1 to (stride/2)-1
-//  3. Return the first offset where disc CRC matches
-//
-// Parameters:
-//   - proc: The processor with computed rolling CRCs
-//   - expectedCRC: The disc CRC from CTDB entry
-//   - stride: Parity stride in samples (typically 11760)
-//   - laststride: Last stride computed from disc length
-//
-// Returns: The detected offset, or 0 if no match found
+// findCTDBOffsetByCRC searches for the drive offset where disc CRC matches expectedCRC.
+// Tries offset 0 first, then searches [-(stride/2)+1, (stride/2)-1].
+// Returns 0 if no match found.
 func findCTDBOffsetByCRC(proc *accuraterip.Processor, expectedCRC uint32, stride, laststride int) int {
 	strideHalf := stride / 2
 
@@ -1122,7 +1041,7 @@ func findCTDBOffset(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, stride
 
 	// First try offset 0 (most common case)
 	localRow := parityState.SyndromeFirstRow(0)
-	if localRow != nil && firstRowMatch(localRow, ctdbFirstRow, npar) {
+	if localRow != nil && repair.FirstRowMatch(localRow, ctdbFirstRow, npar) {
 		return 0
 	}
 
@@ -1136,7 +1055,7 @@ func findCTDBOffset(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, stride
 		if localRow == nil {
 			continue
 		}
-		if firstRowMatch(localRow, ctdbFirstRow, npar) {
+		if repair.FirstRowMatch(localRow, ctdbFirstRow, npar) {
 			return offset
 		}
 	}
@@ -1144,28 +1063,7 @@ func findCTDBOffset(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, stride
 	return 0 // No match found
 }
 
-// firstRowMatch checks if two syndrome first rows match (XOR is all zeros).
-// This is O(npar) instead of O(stride × npar) for full syndrome match.
-func firstRowMatch(local, ctdb []uint16, npar int) bool {
-	for j := 0; j < npar && j < len(ctdb) && j < len(local); j++ {
-		if local[j]^ctdb[j] != 0 {
-			return false
-		}
-	}
-	return true
-}
 
-// syndromeMatch checks if two syndromes match (XOR is all zeros)
-func syndromeMatch(local, ctdb [][]uint16, npar int) bool {
-	for i := 0; i < len(ctdb) && i < len(local); i++ {
-		for j := 0; j < npar && j < len(ctdb[i]) && j < len(local[i]); j++ {
-			if local[i][j]^ctdb[i][j] != 0 {
-				return false
-			}
-		}
-	}
-	return true
-}
 
 // printDebugLayout prints layout information for debugging.
 func printDebugLayout(layout toc.Layout, stride, laststride int) {
@@ -1596,7 +1494,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	// Parity fetching starts automatically as soon as CTDB lookup completes
 	// We get two channels: one for immediate CTDB notification, one for parity data
 	ctdbCh := startCTDBQuery(ctx, layout.TOCString())
-	ctdbNotifyCh, parityCh := startParityFetchWithNotification(ctx, ctdbCh)
+	ctdbNotifyCh, parityCh := startParityFetch(ctx, ctdbCh)
 
 	// Create progress reporter
 	var reporter *progress.Reporter

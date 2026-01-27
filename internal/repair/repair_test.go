@@ -53,7 +53,7 @@ func TestGetTrackSampleRange(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		min, max := getTrackSampleRange(layout, tt.track)
+		min, max := GetTrackSampleRange(layout, tt.track)
 		if min != tt.wantMin {
 			t.Errorf("Track %d: min = %d, want %d", tt.track, min, tt.wantMin)
 		}

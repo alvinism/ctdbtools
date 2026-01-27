@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -557,13 +556,3 @@ func processStreamWithCorrections(
 	return nil
 }
 
-// Helper to create cleanup function
-func createCleanup(stream io.ReadCloser, cmd *exec.Cmd) func() {
-	return func() {
-		stream.Close()
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-		}
-	}
-}

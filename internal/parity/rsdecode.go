@@ -35,24 +35,9 @@ func NewRsDecode(npar int) *RsDecode {
 	}
 }
 
-// CalcSigmaMBM calculates the error locator polynomial using the modified Berlekamp-Massey algorithm.
-//
-// The error locator polynomial σ(x) has roots at the error positions:
-//
-//	σ(x) = (1 - α^e1 * x)(1 - α^e2 * x)...(1 - α^en * x)
-//
-// where e1, e2, ..., en are the error positions.
-//
-// Input:
-//   - syndrome: XOR of local and CTDB syndromes (the "error syndrome")
-//   - sigma: output array for polynomial coefficients
-//
-// Output:
-//   - Returns number of errors (degree of σ), or -1 if uncorrectable
-//   - sigma[0..numErrors] contains the polynomial coefficients
-//
-// This implementation matches CueTools RsDecode.cs calcSigmaMBM exactly.
-// Key difference from standard BM: sg0 is shifted AFTER the polynomial update.
+// CalcSigmaMBM calculates the error locator polynomial using modified Berlekamp-Massey.
+// Returns number of errors (degree of σ), or -1 if uncorrectable.
+// Matches CueTools RsDecode.cs calcSigmaMBM exactly.
 func (r *RsDecode) CalcSigmaMBM(syndrome []int, sigma []int) int {
 	// CueTools uses sg0, sg1, wk arrays and jisu0, jisu1, m counters
 	sg0 := make([]int, r.npar+1)

@@ -19,7 +19,6 @@ type MultiSourceReader struct {
 	currentCmd    *exec.Cmd
 	samplesRead   int64 // samples read from current source
 	totalRead     int64 // total samples read across all sources
-	debug         bool  // enable debug output
 }
 
 // NewMultiSourceReader creates a reader that will read audio from multiple source segments.
@@ -127,10 +126,6 @@ func (r *MultiSourceReader) Read(buf []uint32) (int, error) {
 		// Check if we've read enough from this source
 		src := r.sources[r.currentIdx]
 		if src.Length > 0 && r.samplesRead >= src.Length {
-			if r.debug {
-				fmt.Printf("DEBUG MultiSourceReader: Source %d exhausted (%d samples), switching to next\n",
-					r.currentIdx, r.samplesRead)
-			}
 			// Current source exhausted, move to next
 			if err := r.openNextSource(); err != nil {
 				if err == io.EOF && totalRead > 0 {
@@ -158,10 +153,6 @@ func (r *MultiSourceReader) Read(buf []uint32) (int, error) {
 		remaining -= n
 
 		if err == io.EOF {
-			if r.debug {
-				fmt.Printf("DEBUG MultiSourceReader: Source %d file EOF at %d samples (expected %d)\n",
-					r.currentIdx, r.samplesRead, src.Length)
-			}
 			// Current file exhausted, try next source
 			if err := r.openNextSource(); err != nil {
 				if err == io.EOF {
@@ -179,11 +170,6 @@ func (r *MultiSourceReader) Read(buf []uint32) (int, error) {
 	}
 
 	return totalRead, nil
-}
-
-// SetDebug enables/disables debug output
-func (r *MultiSourceReader) SetDebug(enabled bool) {
-	r.debug = enabled
 }
 
 // Close releases all resources.

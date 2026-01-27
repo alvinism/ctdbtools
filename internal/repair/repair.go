@@ -199,7 +199,7 @@ func AnalyzeEntry(
 	// Calculate per-track errors
 	candidate.TrackErrors = make([]int, layout.AudioTracks)
 	for track := 1; track <= layout.AudioTracks; track++ {
-		trackMin, trackMax := getTrackSampleRange(layout, track)
+		trackMin, trackMax := GetTrackSampleRange(layout, track)
 		for _, corr := range corrections {
 			if corr.Position >= trackMin && corr.Position < trackMax {
 				candidate.TrackErrors[track-1]++
@@ -260,7 +260,7 @@ func findOffsetBySyndrome(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, 
 
 	// First try offset 0 (most common case)
 	localRow := parityState.SyndromeFirstRow(0)
-	if localRow != nil && firstRowMatch(localRow, ctdbFirstRow, npar) {
+	if localRow != nil && FirstRowMatch(localRow, ctdbFirstRow, npar) {
 		return 0
 	}
 
@@ -275,7 +275,7 @@ func findOffsetBySyndrome(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, 
 		if localRow == nil {
 			continue
 		}
-		if firstRowMatch(localRow, ctdbFirstRow, npar) {
+		if FirstRowMatch(localRow, ctdbFirstRow, npar) {
 			return offset
 		}
 	}
@@ -283,28 +283,6 @@ func findOffsetBySyndrome(proc *accuraterip.Processor, ctdbSyndrome [][]uint16, 
 	return 0
 }
 
-// firstRowMatch checks if two syndrome first rows match (XOR is all zeros).
-// This is O(npar) instead of O(stride × npar) for full syndrome match.
-func firstRowMatch(local, ctdb []uint16, npar int) bool {
-	for j := 0; j < npar && j < len(ctdb) && j < len(local); j++ {
-		if local[j]^ctdb[j] != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// syndromeMatch checks if two syndromes match (XOR is all zeros).
-func syndromeMatch(local, ctdb [][]uint16, npar int) bool {
-	for i := 0; i < len(ctdb) && i < len(local); i++ {
-		for j := 0; j < npar && j < len(ctdb[i]) && j < len(local[i]); j++ {
-			if local[i][j]^ctdb[i][j] != 0 {
-				return false
-			}
-		}
-	}
-	return true
-}
 
 // findOffsetByCRC searches for offset by comparing disc CRC (slow fallback).
 func findOffsetByCRC(proc *accuraterip.Processor, expectedCRC uint32, stride, laststride int) int {
@@ -346,7 +324,7 @@ func calculateTrackResults(
 	for track := 1; track <= layout.AudioTracks; track++ {
 		results[track-1].Track = track
 
-		trackMin, trackMax := getTrackSampleRange(layout, track)
+		trackMin, trackMax := GetTrackSampleRange(layout, track)
 
 		// Collect positions in this track
 		var trackPositions []int
@@ -368,14 +346,3 @@ func calculateTrackResults(
 	return results
 }
 
-// getTrackSampleRange returns the sample range [min, max) for a track in 16-bit samples.
-func getTrackSampleRange(layout toc.Layout, track int) (min, max int) {
-	firstTrackStart := layout.TrackStartFrame(1)
-	trackStart := layout.TrackStartFrame(track)
-	trackEnd := trackStart + layout.TrackLengthFrames(track)
-
-	// Convert frames to 16-bit samples (1 frame = 588 stereo = 1176 16-bit)
-	min = (trackStart - firstTrackStart) * 588 * 2
-	max = (trackEnd - firstTrackStart) * 588 * 2
-	return min, max
-}
