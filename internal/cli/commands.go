@@ -28,6 +28,12 @@ type ctdbResult struct {
 	err  error
 }
 
+// parityResult holds the async parity fetch result.
+type parityResult struct {
+	data map[int][][]uint16
+	err  error
+}
+
 // startCTDBQuery launches CTDB lookup in background goroutine.
 // This allows the CTDB network request to run concurrently with audio decoding.
 func startCTDBQuery(ctx context.Context, tocStr string) <-chan ctdbResult {
@@ -44,6 +50,39 @@ func startCTDBQuery(ctx context.Context, tocStr string) <-chan ctdbResult {
 		ch <- ctdbResult{resp: resp, err: err}
 	}()
 	return ch
+}
+
+// startParityFetchWithNotification launches parity fetching in background, chained off CTDB result.
+// Returns two channels:
+// - ctdbNotifyCh: sends CTDB result as soon as lookup completes (for immediate "found" message)
+// - parityCh: sends parity data when all fetches complete
+// This allows printing "found CTDB ID" immediately while parity fetch continues in background.
+func startParityFetchWithNotification(ctx context.Context, ctdbCh <-chan ctdbResult) (<-chan ctdbResult, <-chan parityResult) {
+	ctdbNotifyCh := make(chan ctdbResult, 1)
+	parityCh := make(chan parityResult, 1)
+
+	go func() {
+		// Wait for CTDB result
+		ctdbRes := <-ctdbCh
+
+		// Send notification immediately so caller can print "found CTDB ID"
+		ctdbNotifyCh <- ctdbRes
+
+		if ctdbRes.err != nil {
+			parityCh <- parityResult{err: ctdbRes.err}
+			return
+		}
+
+		// Start fetching parity (runs in parallel with remaining audio processing)
+		httpClient := network.NewHTTPClient()
+		ctdbClient := network.NewCTDBClient(httpClient)
+		const maxParallelFetches = 4
+		data := fetchParityParallel(ctx, ctdbClient, ctdbRes.resp.Entries, maxParallelFetches)
+
+		parityCh <- parityResult{data: data}
+	}()
+
+	return ctdbNotifyCh, parityCh
 }
 
 // fetchParityParallel fetches parity for multiple entries concurrently.
@@ -1552,9 +1591,12 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		sampleCache = ingest.NewSampleCache(int64(finalSampleCount))
 	}
 
-	// Start CTDB query in background (runs concurrently with audio decoding)
-	// This overlaps network I/O with CPU-bound audio processing for ~2s savings
+	// Start CTDB query AND parity fetch in background (chained)
+	// This overlaps network I/O with CPU-bound audio processing
+	// Parity fetching starts automatically as soon as CTDB lookup completes
+	// We get two channels: one for immediate CTDB notification, one for parity data
 	ctdbCh := startCTDBQuery(ctx, layout.TOCString())
+	ctdbNotifyCh, parityCh := startParityFetchWithNotification(ctx, ctdbCh)
 
 	// Create progress reporter
 	var reporter *progress.Reporter
@@ -1565,7 +1607,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		)
 	}
 
-	// Process audio
+	// Process audio (parity fetch runs in parallel!)
 	processOpts := ingest.ProcessOptions{
 		Stride:           opts.Stride,
 		LastStride:       lastStride,
@@ -1591,10 +1633,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		return fmt.Errorf("failed to process audio: %w", err)
 	}
 
-	// Wait for CTDB query result (started before audio processing)
+	// Get CTDB result (should be ready by now, or very soon)
 	tocID, tocErr := layout.TOCID()
 
-	ctdbRes := <-ctdbCh
+	ctdbRes := <-ctdbNotifyCh
 	if ctdbRes.err != nil {
 		if ctdbRes.err == network.ErrNotFound {
 			if tocErr != nil {
@@ -1608,20 +1650,21 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 	resp := ctdbRes.resp
 
+	// Print "found" immediately - parity may still be fetching
 	if tocErr != nil {
 		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
 	} else {
 		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
 	}
 
-	// Create HTTP client for parity fetches
-	httpClient := network.NewHTTPClient()
-	ctdbClient := network.NewCTDBClient(httpClient)
-
-	// Fetch parity data in parallel for all entries with parity
-	// This significantly reduces total fetch time when multiple entries have parity
-	const maxParallelFetches = 4
-	parityData := fetchParityParallel(ctx, ctdbClient, resp.Entries, maxParallelFetches)
+	// Wait for parity data (may already be complete)
+	fmt.Print("Fetching parity data...")
+	parityRes := <-parityCh
+	fmt.Print("\r                       \r") // Clear the message
+	if parityRes.err != nil {
+		return fmt.Errorf("failed to fetch parity: %w", parityRes.err)
+	}
+	parityData := parityRes.data
 
 	// Filter entries with parity data
 	var candidates []*repair.RepairCandidate
@@ -1715,10 +1758,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		return fmt.Errorf("errors cannot be corrected (too many errors per stride row)")
 	}
 
-	// Fetch parity for selected entry
-	ctdbSyndrome, err := ctdbClient.FetchParity(ctx, selected.Entry, selected.Entry.Npar)
-	if err != nil {
-		return fmt.Errorf("failed to fetch parity data: %w", err)
+	// Get parity data for selected entry (already fetched in parallel)
+	ctdbSyndrome := parityData[selected.Index]
+	if ctdbSyndrome == nil {
+		return fmt.Errorf("parity data not available for selected entry")
 	}
 
 	// Execute repair
@@ -1731,19 +1774,34 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		inputPath = opts.DirPath
 	}
 
+	// Extract source file paths for preserving filenames in split-track mode
+	var sourceFiles []string
+	for _, src := range sheet.Sources {
+		sourceFiles = append(sourceFiles, src.FilePath)
+	}
+
+	// Use sheet.CuePath if opts.CuePath is empty (directory mode discovery)
+	originalCuePath := opts.CuePath
+	if originalCuePath == "" && sheet.CuePath != "" {
+		originalCuePath = sheet.CuePath
+	}
+
 	repairOpts := repair.RepairOptions{
-		InputPath:    inputPath,
-		OutputDir:    opts.OutputDir,
-		Layout:       layout,
-		Stride:       selected.Entry.Stride,
-		Npar:         selected.Entry.Npar,
-		Auto:         opts.Auto,
-		DryRun:       opts.DryRun,
-		Force:        opts.Force,
-		Verbose:      opts.Verbose,
-		ShowProgress: opts.ShowProgress,
-		Reporter:     reporter,
-		SampleCache:  sampleCache,
+		InputPath:       inputPath,
+		OutputDir:       opts.OutputDir,
+		Layout:          layout,
+		Stride:          selected.Entry.Stride,
+		Npar:            selected.Entry.Npar,
+		Auto:            opts.Auto,
+		DryRun:          opts.DryRun,
+		Force:           opts.Force,
+		Verbose:         opts.Verbose,
+		ShowProgress:    opts.ShowProgress,
+		Reporter:        reporter,
+		SampleCache:     sampleCache,
+		OriginalCuePath: originalCuePath,
+		IsSplitTrack:    isSplitTrack,
+		SourceFiles:     sourceFiles,
 	}
 
 	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)
@@ -1768,13 +1826,21 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	// Write output files
-	outputFiles, err := repair.WriteOutputFiles(opts.OutputDir, result, layout)
+	outputFiles, err := repair.WriteOutputFiles(opts.OutputDir, result, layout, repairOpts)
 	if err != nil {
 		return fmt.Errorf("failed to write output files: %w", err)
 	}
 
 	fmt.Printf("\nOutput files written to %s:\n", opts.OutputDir)
-	fmt.Printf("  - %s\n", filepath.Base(outputFiles.WAVPath))
+	if len(outputFiles.WAVPaths) > 1 {
+		// Split-track mode: show all WAV files
+		for _, wavPath := range outputFiles.WAVPaths {
+			fmt.Printf("  - %s\n", filepath.Base(wavPath))
+		}
+	} else {
+		// Single-file mode
+		fmt.Printf("  - %s\n", filepath.Base(outputFiles.WAVPath))
+	}
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.CUEPath))
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.LogPath))
 

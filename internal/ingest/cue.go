@@ -388,7 +388,12 @@ func ParseCueSheetFile(path string) (CueSheet, error) {
 	}
 
 	cueDir := filepath.Dir(path)
-	return ParseCueSheet(lines, cueDir)
+	sheet, err := ParseCueSheet(lines, cueDir)
+	if err != nil {
+		return CueSheet{}, err
+	}
+	sheet.CuePath = path
+	return sheet, nil
 }
 
 // detectAndConvertEncoding detects the encoding of content and converts it to UTF-8.

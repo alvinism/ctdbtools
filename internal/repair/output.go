@@ -1,9 +1,11 @@
 package repair
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"ctdbtools/internal/toc"
@@ -11,20 +13,73 @@ import (
 )
 
 // WriteOutputFiles generates all output files for a repair operation.
-func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout) (*OutputFiles, error) {
+func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout, opts RepairOptions) (*OutputFiles, error) {
 	files := &OutputFiles{}
 
-	// Determine base name for output files
+	// Determine base name for output files (preserve original CUE filename if available)
 	baseName := "album"
+	if opts.OriginalCuePath != "" {
+		cueBase := filepath.Base(opts.OriginalCuePath)
+		ext := filepath.Ext(cueBase)
+		baseName = cueBase[:len(cueBase)-len(ext)]
+	}
 
-	// Set file paths
-	files.WAVPath = filepath.Join(outputDir, baseName+".wav")
+	// Set file paths based on split-track vs single-file mode
+	if opts.IsSplitTrack {
+		// Split-track mode: derive WAV filenames from original source files
+		files.WAVPaths = make([]string, len(opts.SourceFiles))
+		for i, sourcePath := range opts.SourceFiles {
+			wavName := deriveOutputFilename(sourcePath, i+1)
+			files.WAVPaths[i] = filepath.Join(outputDir, wavName)
+		}
+		// Set WAVPath to first file for backwards compatibility
+		if len(files.WAVPaths) > 0 {
+			files.WAVPath = files.WAVPaths[0]
+		}
+	} else {
+		// Single-file mode
+		files.WAVPath = filepath.Join(outputDir, baseName+".wav")
+		files.WAVPaths = []string{files.WAVPath}
+	}
+
 	files.CUEPath = filepath.Join(outputDir, baseName+".cue")
-	files.LogPath = filepath.Join(outputDir, baseName+".log")
+	files.LogPath = filepath.Join(outputDir, "ctdbtools_repair.log")
 
-	// CUE sheet
-	if err := writeCueSheet(files.CUEPath, baseName+".wav", layout); err != nil {
-		return files, fmt.Errorf("failed to write CUE sheet: %w", err)
+	// CUE sheet - try to transform original if available
+	var cueErr error
+	if opts.OriginalCuePath != "" {
+		// Transform original CUE to preserve metadata
+		var newFileRefs []string
+		if opts.IsSplitTrack {
+			// Use the new WAV filenames (just base names for CUE)
+			for _, p := range files.WAVPaths {
+				newFileRefs = append(newFileRefs, filepath.Base(p))
+			}
+		} else {
+			newFileRefs = []string{baseName + ".wav"}
+		}
+		cueErr = transformCueSheet(opts.OriginalCuePath, files.CUEPath, newFileRefs)
+		if cueErr != nil {
+			fmt.Printf("Warning: failed to transform CUE sheet: %v, generating new one\n", cueErr)
+		}
+	}
+
+	// Fall back to generating CUE if no original or transformation failed
+	if opts.OriginalCuePath == "" || cueErr != nil {
+		if opts.IsSplitTrack {
+			// Generate split-track CUE
+			var wavNames []string
+			for _, p := range files.WAVPaths {
+				wavNames = append(wavNames, filepath.Base(p))
+			}
+			if err := writeCueSheetSplitTrack(files.CUEPath, wavNames, layout); err != nil {
+				return files, fmt.Errorf("failed to write CUE sheet: %w", err)
+			}
+		} else {
+			if err := writeCueSheet(files.CUEPath, baseName+".wav", layout); err != nil {
+				return files, fmt.Errorf("failed to write CUE sheet: %w", err)
+			}
+		}
 	}
 
 	// Repair log
@@ -33,6 +88,103 @@ func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout)
 	}
 
 	return files, nil
+}
+
+// transformCueSheet reads the original CUE file and transforms FILE references
+// to point to the new WAV files while preserving all other metadata.
+func transformCueSheet(originalPath, outputPath string, newFileRefs []string) error {
+	inFile, err := os.Open(originalPath)
+	if err != nil {
+		return fmt.Errorf("failed to open original CUE: %w", err)
+	}
+	defer inFile.Close()
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output CUE: %w", err)
+	}
+	defer outFile.Close()
+
+	// Regex to match FILE directive: FILE "filename" WAVE (or BINARY, etc.)
+	// Captures: prefix, filename (with quotes), type
+	fileRegex := regexp.MustCompile(`^(\s*FILE\s+)"([^"]+)"(\s+\w+.*)$`)
+
+	scanner := bufio.NewScanner(inFile)
+	writer := bufio.NewWriter(outFile)
+	defer writer.Flush()
+
+	fileIdx := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if matches := fileRegex.FindStringSubmatch(line); matches != nil {
+			// This is a FILE directive - replace the filename
+			if fileIdx < len(newFileRefs) {
+				// Reconstruct with new filename
+				newLine := fmt.Sprintf("%s\"%s\"%s", matches[1], newFileRefs[fileIdx], matches[3])
+				writer.WriteString(newLine + "\n")
+				fileIdx++
+			} else {
+				// More FILE directives than new refs - keep original
+				writer.WriteString(line + "\n")
+			}
+		} else {
+			// Not a FILE directive - preserve as-is
+			writer.WriteString(line + "\n")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading CUE file: %w", err)
+	}
+
+	return nil
+}
+
+// writeCueSheetSplitTrack generates a CUE sheet for split-track output.
+// Each track gets its own FILE directive.
+func writeCueSheetSplitTrack(path string, wavFiles []string, layout toc.Layout) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Write CUE header
+	fmt.Fprintf(f, "REM Generated by ctdbtools %s\n", version.Version)
+	fmt.Fprintf(f, "REM Repaired audio files (split-track)\n")
+
+	// Write track entries - each with its own FILE directive
+	trackNum := 0
+	for i, track := range layout.Tracks {
+		if !track.IsAudio {
+			continue
+		}
+		trackNum++
+
+		if trackNum-1 < len(wavFiles) {
+			fmt.Fprintf(f, "FILE \"%s\" WAVE\n", wavFiles[trackNum-1])
+		} else {
+			fmt.Fprintf(f, "FILE \"%02d.wav\" WAVE\n", trackNum)
+		}
+
+		fmt.Fprintf(f, "  TRACK %02d AUDIO\n", i+1)
+
+		// For split-track, each file starts at 00:00:00
+		// Pregap handling: if track has pregap, it's typically embedded at end of previous file
+		if track.Pregap > 0 && trackNum > 1 {
+			// Pregap embedded in previous track file - INDEX 00 not needed here
+			fmt.Fprintf(f, "    INDEX 01 00:00:00\n")
+		} else if track.Pregap > 0 && trackNum == 1 {
+			// First track with pregap
+			fmt.Fprintf(f, "    INDEX 00 00:00:00\n")
+			fmt.Fprintf(f, "    INDEX 01 %s\n", framesToMSF(track.Pregap))
+		} else {
+			fmt.Fprintf(f, "    INDEX 01 00:00:00\n")
+		}
+	}
+
+	return nil
 }
 
 // writeCueSheet generates a CUE sheet for the repaired audio.

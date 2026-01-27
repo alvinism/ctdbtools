@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
@@ -23,6 +24,9 @@ import (
 //
 // If opts.SampleCache is provided and populated, uses cached samples instead of
 // re-decoding with FFmpeg (significantly faster).
+//
+// Returns the list of output WAV file paths (single file for single-file mode,
+// multiple files for split-track mode).
 func ApplyCorrections(
 	ctx context.Context,
 	inputPath string,
@@ -31,56 +35,79 @@ func ApplyCorrections(
 	layout toc.Layout,
 	opts RepairOptions,
 	reporter *progress.Reporter,
-) error {
+) ([]string, error) {
 	// Calculate total samples for progress reporting
 	totalSamples := int64(layout.AudioLengthFrames()) * 588
 
 	// Ensure output directory exists
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	// Use cached samples if available (avoids second FFmpeg decode pass)
+	if opts.SampleCache != nil && opts.SampleCache.Length() > 0 {
+		// Split-track mode with cached samples
+		if opts.IsSplitTrack {
+			return applyCorrectionsCachedSplitTrack(ctx, opts.SampleCache, outputDir, corrections, layout, reporter, opts)
+		}
+
+		// Single-file mode with cached samples
+		wavPath := filepath.Join(outputDir, "album.wav")
+		if _, err := os.Stat(wavPath); err == nil && !opts.Force {
+			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPath)
+		}
+
+		writer, err := audio.NewWAVWriter(wavPath)
+		if err != nil {
+			return nil, err
+		}
+		defer writer.Close()
+
+		if err := applyCorrectionsCached(ctx, opts.SampleCache, writer, corrections, reporter, totalSamples); err != nil {
+			return nil, err
+		}
+		return []string{wavPath}, nil
+	}
+
+	// Fall back to FFmpeg-based correction (original path)
 	// Check if output already exists
 	wavPath := filepath.Join(outputDir, "album.wav")
 	if _, err := os.Stat(wavPath); err == nil && !opts.Force {
-		return fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPath)
+		return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPath)
 	}
 
 	// Create WAV writer
 	writer, err := audio.NewWAVWriter(wavPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer writer.Close()
 
-	// Use cached samples if available (avoids second FFmpeg decode pass)
-	if opts.SampleCache != nil && opts.SampleCache.Length() > 0 {
-		return applyCorrectionsCached(ctx, opts.SampleCache, writer, corrections, reporter, totalSamples)
-	}
-
-	// Fall back to FFmpeg-based correction (original path)
 	// Parse CUE to determine if split-track
 	var sheet ingest.CueSheet
 	if filepath.Ext(inputPath) == ".cue" {
 		sheet, err = ingest.ParseCueSheetFile(inputPath)
 		if err != nil {
-			return fmt.Errorf("failed to parse CUE: %w", err)
+			return nil, fmt.Errorf("failed to parse CUE: %w", err)
 		}
 	} else {
 		// Directory mode - discover audio files
 		sheet, err = ingest.DiscoverDirectory(ctx, inputPath)
 		if err != nil {
-			return fmt.Errorf("failed to discover audio: %w", err)
+			return nil, fmt.Errorf("failed to discover audio: %w", err)
 		}
 	}
 
 	if len(sheet.Sources) == 0 {
-		return fmt.Errorf("no audio files found")
+		return nil, fmt.Errorf("no audio files found")
 	}
 
 	// Check if split-track (multiple source files)
 	if sheet.IsSplitTrack() {
-		return applyCorrectionsSplitTrack(ctx, sheet, writer, corrections, reporter, totalSamples, layout.AudioTracks)
+		if err := applyCorrectionsSplitTrack(ctx, sheet, writer, corrections, reporter, totalSamples, layout.AudioTracks); err != nil {
+			return nil, err
+		}
+		return []string{wavPath}, nil
 	}
 
 	// Single file mode
@@ -89,7 +116,10 @@ func ApplyCorrections(
 		audioPath = filepath.Join(sheet.CueDir, audioPath)
 	}
 
-	return applyCorrectionsSingleFile(ctx, audioPath, writer, corrections, reporter, totalSamples)
+	if err := applyCorrectionsSingleFile(ctx, audioPath, writer, corrections, reporter, totalSamples); err != nil {
+		return nil, err
+	}
+	return []string{wavPath}, nil
 }
 
 // applyCorrectionsCached applies corrections using cached samples instead of FFmpeg.
@@ -156,7 +186,7 @@ func applyCorrectionsCached(
 
 		// Report progress every 100000 samples
 		if reporter != nil && sampleIdx-lastReportedSample >= 100000 {
-			reporter.Update(int64(sampleIdx), 0, "Applying corrections (cached)...")
+			reporter.Update(int64(sampleIdx), 0, "Applying corrections...")
 			lastReportedSample = sampleIdx
 		}
 
@@ -172,6 +202,153 @@ func applyCorrectionsCached(
 	}
 
 	return nil
+}
+
+// applyCorrectionsCachedSplitTrack applies corrections using cached samples for split-track mode.
+// Creates separate WAV files for each track, preserving original filenames.
+func applyCorrectionsCachedSplitTrack(
+	ctx context.Context,
+	cache *ingest.SampleCache,
+	outputDir string,
+	corrections []parity.ErrorCorrection,
+	layout toc.Layout,
+	reporter *progress.Reporter,
+	opts RepairOptions,
+) ([]string, error) {
+	reader := cache.Reader()
+
+	// Prepare output paths
+	wavPaths := make([]string, layout.AudioTracks)
+	for i := 0; i < layout.AudioTracks; i++ {
+		var sourcePath string
+		if i < len(opts.SourceFiles) {
+			sourcePath = opts.SourceFiles[i]
+		}
+		wavName := deriveOutputFilename(sourcePath, i+1)
+		wavPaths[i] = filepath.Join(outputDir, wavName)
+
+		// Check if file already exists
+		if _, err := os.Stat(wavPaths[i]); err == nil && !opts.Force {
+			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPaths[i])
+		}
+	}
+
+	buf := make([]uint32, 16384)
+	corrIdx := 0
+	globalSampleIdx := 0 // Global stereo sample index
+	lastReportedSample := 0
+
+	// Process each track
+	for trackNum := 1; trackNum <= layout.AudioTracks; trackNum++ {
+		// Create WAV writer for this track
+		writer, err := audio.NewWAVWriter(wavPaths[trackNum-1])
+		if err != nil {
+			return nil, fmt.Errorf("failed to create WAV file for track %d: %w", trackNum, err)
+		}
+
+		// Calculate samples for this track
+		trackLengthSamples := layout.TrackLengthFrames(trackNum) * 588
+		trackEndSample := globalSampleIdx + trackLengthSamples
+
+		if reporter != nil {
+			reporter.ForceUpdate(int64(globalSampleIdx), trackNum,
+				fmt.Sprintf("Writing track %d/%d...", trackNum, layout.AudioTracks))
+		}
+
+		// Read and write samples for this track
+		samplesWritten := 0
+		for samplesWritten < trackLengthSamples {
+			select {
+			case <-ctx.Done():
+				writer.Close()
+				return nil, ctx.Err()
+			default:
+			}
+
+			// Calculate how many samples to read
+			remaining := trackLengthSamples - samplesWritten
+			toRead := len(buf)
+			if toRead > remaining {
+				toRead = remaining
+			}
+
+			n, err := reader.Read(buf[:toRead])
+			if n == 0 && err != nil {
+				writer.Close()
+				if err == io.EOF {
+					break
+				}
+				return nil, fmt.Errorf("read error on track %d: %w", trackNum, err)
+			}
+
+			// Apply corrections to buffer in-place
+			for i := 0; i < n; i++ {
+				samplePos := globalSampleIdx + i
+				// Check if left channel needs correction (16-bit sample index)
+				leftIdx := samplePos * 2
+				if corrIdx < len(corrections) && corrections[corrIdx].Position == leftIdx {
+					left := uint16(buf[i] & 0xFFFF)
+					left ^= corrections[corrIdx].Magnitude
+					buf[i] = uint32(left) | (buf[i] & 0xFFFF0000)
+					corrIdx++
+				}
+
+				// Check if right channel needs correction (16-bit sample index + 1)
+				rightIdx := samplePos*2 + 1
+				if corrIdx < len(corrections) && corrections[corrIdx].Position == rightIdx {
+					right := uint16(buf[i] >> 16)
+					right ^= corrections[corrIdx].Magnitude
+					buf[i] = (buf[i] & 0x0000FFFF) | uint32(right)<<16
+					corrIdx++
+				}
+			}
+
+			// Write to track file
+			if err := writer.WriteSamplesBulk(buf[:n]); err != nil {
+				writer.Close()
+				return nil, fmt.Errorf("failed to write samples for track %d: %w", trackNum, err)
+			}
+
+			globalSampleIdx += n
+			samplesWritten += n
+
+			// Report progress
+			if reporter != nil && globalSampleIdx-lastReportedSample >= 100000 {
+				reporter.Update(int64(globalSampleIdx), trackNum, "Applying corrections...")
+				lastReportedSample = globalSampleIdx
+			}
+
+			if err == io.EOF {
+				break
+			}
+		}
+
+		writer.Close()
+
+		// Verify we wrote enough samples
+		if samplesWritten < trackLengthSamples && globalSampleIdx < trackEndSample {
+			return nil, fmt.Errorf("incomplete track %d: wrote %d samples, expected %d", trackNum, samplesWritten, trackLengthSamples)
+		}
+	}
+
+	// Verify all corrections were applied
+	if corrIdx < len(corrections) {
+		return nil, fmt.Errorf("not all corrections were applied: %d remaining (last applied at position %d, next needed at %d)",
+			len(corrections)-corrIdx, globalSampleIdx*2, corrections[corrIdx].Position)
+	}
+
+	return wavPaths, nil
+}
+
+// deriveOutputFilename derives the output WAV filename from original source path.
+// It preserves the original filename but changes the extension to .wav.
+func deriveOutputFilename(originalPath string, trackNum int) string {
+	if originalPath == "" {
+		return fmt.Sprintf("%02d.wav", trackNum)
+	}
+	base := filepath.Base(originalPath)
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext) + ".wav"
 }
 
 // applyCorrectionsSingleFile handles repair for single-file CUE sheets.

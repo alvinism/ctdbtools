@@ -117,7 +117,7 @@ func Execute(
 	}
 
 	// Apply corrections and write output
-	err = ApplyCorrections(ctx, opts.InputPath, opts.OutputDir, corrections, layout, opts, reporter)
+	_, err = ApplyCorrections(ctx, opts.InputPath, opts.OutputDir, corrections, layout, opts, reporter)
 	if err != nil {
 		if reporter != nil {
 			reporter.Finish()

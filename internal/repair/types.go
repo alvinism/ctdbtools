@@ -94,8 +94,11 @@ type RepairCandidate struct {
 
 // OutputFiles contains paths to generated output files.
 type OutputFiles struct {
-	// Path to output WAV file
+	// Path to output WAV file (for single-file mode)
 	WAVPath string
+
+	// All output WAV files (supports multiple for split-track mode)
+	WAVPaths []string
 
 	// Path to output CUE file
 	CUEPath string
@@ -144,4 +147,13 @@ type RepairOptions struct {
 
 	// SampleCache holds cached audio samples from Pass 1 to avoid re-decoding
 	SampleCache *ingest.SampleCache
+
+	// OriginalCuePath is the path to the original CUE file for metadata preservation
+	OriginalCuePath string
+
+	// IsSplitTrack indicates whether input was split-track (multiple source files)
+	IsSplitTrack bool
+
+	// SourceFiles contains original source file paths (for preserving filenames)
+	SourceFiles []string
 }

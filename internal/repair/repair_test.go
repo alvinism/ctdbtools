@@ -1,6 +1,9 @@
 package repair
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"ctdbtools/internal/parity"
@@ -187,15 +190,18 @@ func TestRepairCandidate(t *testing.T) {
 // TestRepairOptions verifies RepairOptions fields.
 func TestRepairOptions(t *testing.T) {
 	opts := RepairOptions{
-		InputPath:    "/path/to/album.cue",
-		OutputDir:    "/path/to/output",
-		Stride:       11760,
-		Npar:         8,
-		Auto:         true,
-		DryRun:       false,
-		Force:        true,
-		Verbose:      true,
-		ShowProgress: true,
+		InputPath:       "/path/to/album.cue",
+		OutputDir:       "/path/to/output",
+		Stride:          11760,
+		Npar:            8,
+		Auto:            true,
+		DryRun:          false,
+		Force:           true,
+		Verbose:         true,
+		ShowProgress:    true,
+		OriginalCuePath: "/path/to/original.cue",
+		IsSplitTrack:    true,
+		SourceFiles:     []string{"01.flac", "02.flac"},
 	}
 
 	if opts.Stride != 11760 {
@@ -212,5 +218,172 @@ func TestRepairOptions(t *testing.T) {
 
 	if opts.DryRun {
 		t.Error("DryRun = true, want false")
+	}
+
+	if opts.OriginalCuePath != "/path/to/original.cue" {
+		t.Errorf("OriginalCuePath = %s, want /path/to/original.cue", opts.OriginalCuePath)
+	}
+
+	if !opts.IsSplitTrack {
+		t.Error("IsSplitTrack = false, want true")
+	}
+
+	if len(opts.SourceFiles) != 2 {
+		t.Errorf("len(SourceFiles) = %d, want 2", len(opts.SourceFiles))
+	}
+}
+
+// TestDeriveOutputFilename verifies output filename derivation.
+func TestDeriveOutputFilename(t *testing.T) {
+	tests := []struct {
+		original string
+		trackNum int
+		want     string
+	}{
+		{"01 - Song Title.flac", 1, "01 - Song Title.wav"},
+		{"Track01.ape", 1, "Track01.wav"},
+		{"/path/to/02 - Another Song.m4a", 2, "02 - Another Song.wav"},
+		{"", 3, "03.wav"},
+		{"song.FLAC", 1, "song.wav"},
+		{"01.wv", 1, "01.wav"},
+	}
+
+	for _, tt := range tests {
+		got := deriveOutputFilename(tt.original, tt.trackNum)
+		if got != tt.want {
+			t.Errorf("deriveOutputFilename(%q, %d) = %q, want %q", tt.original, tt.trackNum, got, tt.want)
+		}
+	}
+}
+
+// TestTransformCueSheet verifies CUE sheet transformation preserves metadata.
+func TestTransformCueSheet(t *testing.T) {
+	// Create temp directory for test files
+	tmpDir, err := os.MkdirTemp("", "cue-transform-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create original CUE content with rich metadata
+	originalCue := `TITLE "Test Album"
+PERFORMER "Test Artist"
+CATALOG 1234567890123
+REM GENRE "Rock"
+REM DATE "2024"
+REM DISCID AB123456
+FILE "01 - First Track.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "First Track"
+    PERFORMER "Artist 1"
+    ISRC USTEST000001
+    INDEX 01 00:00:00
+FILE "02 - Second Track.flac" WAVE
+  TRACK 02 AUDIO
+    TITLE "Second Track"
+    PERFORMER "Artist 2"
+    ISRC USTEST000002
+    INDEX 01 00:00:00
+FILE "03 - Third Track.flac" WAVE
+  TRACK 03 AUDIO
+    TITLE "Third Track"
+    PERFORMER "Artist 3"
+    ISRC USTEST000003
+    INDEX 01 00:00:00
+`
+
+	originalPath := filepath.Join(tmpDir, "original.cue")
+	outputPath := filepath.Join(tmpDir, "output.cue")
+
+	if err := os.WriteFile(originalPath, []byte(originalCue), 0644); err != nil {
+		t.Fatalf("Failed to write original CUE: %v", err)
+	}
+
+	// Transform CUE
+	newRefs := []string{
+		"01 - First Track.wav",
+		"02 - Second Track.wav",
+		"03 - Third Track.wav",
+	}
+
+	if err := transformCueSheet(originalPath, outputPath, newRefs); err != nil {
+		t.Fatalf("transformCueSheet failed: %v", err)
+	}
+
+	// Read transformed CUE
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("Failed to read output CUE: %v", err)
+	}
+
+	transformed := string(content)
+
+	// Verify metadata is preserved
+	metadataChecks := []string{
+		`TITLE "Test Album"`,
+		`PERFORMER "Test Artist"`,
+		`CATALOG 1234567890123`,
+		`REM GENRE "Rock"`,
+		`REM DATE "2024"`,
+		`REM DISCID AB123456`,
+		`TITLE "First Track"`,
+		`PERFORMER "Artist 1"`,
+		`ISRC USTEST000001`,
+		`TITLE "Second Track"`,
+		`PERFORMER "Artist 2"`,
+		`ISRC USTEST000002`,
+		`TITLE "Third Track"`,
+		`PERFORMER "Artist 3"`,
+		`ISRC USTEST000003`,
+	}
+
+	for _, check := range metadataChecks {
+		if !strings.Contains(transformed, check) {
+			t.Errorf("Transformed CUE missing metadata: %s", check)
+		}
+	}
+
+	// Verify FILE references are updated
+	fileChecks := []string{
+		`FILE "01 - First Track.wav" WAVE`,
+		`FILE "02 - Second Track.wav" WAVE`,
+		`FILE "03 - Third Track.wav" WAVE`,
+	}
+
+	for _, check := range fileChecks {
+		if !strings.Contains(transformed, check) {
+			t.Errorf("Transformed CUE missing file reference: %s", check)
+		}
+	}
+
+	// Verify old file references are NOT present
+	oldFileChecks := []string{
+		`"01 - First Track.flac"`,
+		`"02 - Second Track.flac"`,
+		`"03 - Third Track.flac"`,
+	}
+
+	for _, check := range oldFileChecks {
+		if strings.Contains(transformed, check) {
+			t.Errorf("Transformed CUE still contains old file reference: %s", check)
+		}
+	}
+}
+
+// TestOutputFilesWAVPaths verifies WAVPaths field in OutputFiles.
+func TestOutputFilesWAVPaths(t *testing.T) {
+	files := OutputFiles{
+		WAVPath:  "/path/to/album.wav",
+		WAVPaths: []string{"/path/to/01.wav", "/path/to/02.wav", "/path/to/03.wav"},
+		CUEPath:  "/path/to/album.cue",
+		LogPath:  "/path/to/album.log",
+	}
+
+	if len(files.WAVPaths) != 3 {
+		t.Errorf("len(WAVPaths) = %d, want 3", len(files.WAVPaths))
+	}
+
+	if files.WAVPaths[0] != "/path/to/01.wav" {
+		t.Errorf("WAVPaths[0] = %s, want /path/to/01.wav", files.WAVPaths[0])
 	}
 }

@@ -14,6 +14,7 @@ type SourceSegment struct {
 type CueSheet struct {
 	toc.Layout
 	CueDir      string          // Directory containing CUE file
+	CuePath     string          // Full path to original CUE file (if any)
 	Sources     []SourceSegment // Ordered audio segments (one per track typically)
 	AudioLayout toc.Layout      // Layout with audio-only lengths for CRC calculation (may differ from Layout for split tracks)
 }
