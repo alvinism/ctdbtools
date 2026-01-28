@@ -24,8 +24,9 @@ import (
 
 // ctdbResult holds the async CTDB lookup result.
 type ctdbResult struct {
-	resp *network.CTDBResponse
-	err  error
+	resp          *network.CTDBResponse
+	err           error
+	detectedPregap int // Pregap frames detected via fuzzy matching
 }
 
 // parityResult holds the async parity fetch result.
@@ -36,17 +37,50 @@ type parityResult struct {
 
 // startCTDBQuery launches CTDB lookup in background goroutine.
 // This allows the CTDB network request to run concurrently with audio decoding.
+// Detects pregap from TOC difference between local and CTDB TOC (works for both exact and fuzzy matches).
 func startCTDBQuery(ctx context.Context, tocStr string) <-chan ctdbResult {
 	ch := make(chan ctdbResult, 1)
 	go func() {
 		httpClient := network.NewHTTPClient()
 		ctdbClient := network.NewCTDBClient(httpClient)
+
+		// Try exact match first
 		resp, err := ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
 			TOC:            tocStr,
 			CTDB:           true,
 			Fuzzy:          false,
 			MetadataSearch: network.CTDBMetadataSearchNone,
 		})
+
+		// If exact match succeeds, check for pregap difference and return
+		if err == nil && resp != nil && len(resp.Entries) > 0 {
+			// Even with exact TOCID match, the database TOC may have different
+			// track start positions (e.g., pregap that our local rip is missing).
+			// Detect pregap from TOC difference.
+			ctdbTOC := resp.Entries[0].TOC
+			pregap := toc.DetectPregapFromTOC(tocStr, ctdbTOC)
+			ch <- ctdbResult{resp: resp, err: nil, detectedPregap: pregap}
+			return
+		}
+
+		// If not found, retry with fuzzy matching
+		if err == network.ErrNotFound {
+			resp, err = ctdbClient.Lookup(ctx, network.CTDBLookupOptions{
+				TOC:            tocStr,
+				CTDB:           true,
+				Fuzzy:          true,
+				MetadataSearch: network.CTDBMetadataSearchNone,
+			})
+
+			if err == nil && resp != nil && len(resp.Entries) > 0 {
+				// Fuzzy match succeeded - detect pregap from TOC difference
+				ctdbTOC := resp.Entries[0].TOC
+				pregap := toc.DetectPregapFromTOC(tocStr, ctdbTOC)
+				ch <- ctdbResult{resp: resp, err: nil, detectedPregap: pregap}
+				return
+			}
+		}
+
 		ch <- ctdbResult{resp: resp, err: err}
 	}()
 	return ch
@@ -85,6 +119,24 @@ func startParityFetch(ctx context.Context, ctdbCh <-chan ctdbResult) (<-chan ctd
 	return ctdbNotifyCh, parityCh
 }
 
+// startParityFetchFromResult launches parity fetching from a pre-received CTDB result.
+// This is used when CTDB result must be processed before audio processing (e.g., for pregap detection).
+func startParityFetchFromResult(ctx context.Context, ctdbRes ctdbResult) <-chan parityResult {
+	parityCh := make(chan parityResult, 1)
+	go func() {
+		if ctdbRes.err != nil {
+			parityCh <- parityResult{err: ctdbRes.err}
+			return
+		}
+		httpClient := network.NewHTTPClient()
+		ctdbClient := network.NewCTDBClient(httpClient)
+		const maxParallelFetches = 4
+		data := fetchParityParallel(ctx, ctdbClient, ctdbRes.resp.Entries, maxParallelFetches)
+		parityCh <- parityResult{data: data}
+	}()
+	return parityCh
+}
+
 // fetchParityParallel fetches parity for multiple entries concurrently.
 // Returns a map of entry index to syndrome data.
 func fetchParityParallel(ctx context.Context, client network.CTDBClient,
@@ -119,6 +171,8 @@ func fetchParityParallel(ctx context.Context, client network.CTDBClient,
 
 // processCTDBResult handles the async CTDB lookup result.
 // This is called after audio processing completes to process the pre-fetched CTDB response.
+// Note: Pregap correction is now applied in the Verify/Repair functions before calling this,
+// so the layout passed here already has the correct pregap values.
 func processCTDBResult(ctx context.Context, layout toc.Layout, proc *accuraterip.Processor, result ctdbResult, verbose bool) error {
 	tocID, tocErr := layout.TOCID()
 
@@ -130,6 +184,7 @@ func processCTDBResult(ctx context.Context, layout toc.Layout, proc *accuraterip
 			} else {
 				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
 			}
+			fmt.Printf("CTDB TOC: %s\n", layout.TOCString())
 			return nil
 		}
 		return result.err
@@ -338,6 +393,22 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 	// Wait for async CTDB result (started before audio processing)
 	if opts.QueryCTDB && ctdbCh != nil {
 		ctdbRes := <-ctdbCh
+
+		// Apply pregap correction to layout BEFORE processing
+		// This fixes the pass-by-value bug where processCTDBResult's modifications
+		// were lost, causing AccurateRip to use the wrong layout
+		if ctdbRes.detectedPregap > 0 {
+			fmt.Printf("Pregap length %s.\n", formatFramesAsTime(ctdbRes.detectedPregap))
+			for i := range layout.Tracks {
+				layout.Tracks[i].Start += ctdbRes.detectedPregap
+			}
+			// DON'T set layout.Tracks[0].Pregap - the detected pregap is a TOC-level
+			// offset for TOCID matching, not actual audio content. Setting it would
+			// incorrectly affect repair calculations (stridecount, error positions).
+			layout.Leadout += ctdbRes.detectedPregap
+		}
+
+		// Now process CTDB result with corrected layout
 		if err := processCTDBResult(ctx, layout, proc, ctdbRes, opts.Verbose); err != nil {
 			// Print TOCID with error status
 			tocID, tocErr := layout.TOCID()
@@ -349,7 +420,7 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 		}
 	}
 
-	// Query AccurateRip
+	// Query AccurateRip (now uses the corrected layout with pregap applied)
 	if opts.QueryAR {
 		if err := queryAccurateRip(ctx, layout, proc, opts.Verbose); err != nil {
 			// Print AccurateRip ID with error status
@@ -603,6 +674,14 @@ type trackErrorInfo struct {
 	confidence int
 	errorCount int
 	positions  string // formatted as MM:SS:FF-MM:SS:FF
+}
+
+// formatFramesAsTime formats frames as MM:SS:FF (like CUETools)
+func formatFramesAsTime(frames int) string {
+	ff := frames % 75
+	ss := (frames / 75) % 60
+	mm := frames / 75 / 60
+	return fmt.Sprintf("%02d:%02d:%02d", mm, ss, ff)
 }
 
 
@@ -1475,7 +1554,44 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		}
 	}
 
-	// Compute lastStride
+	// Start CTDB query first - we need pregap info BEFORE processing audio
+	// This is critical: the processor's syndrome data must be calculated with
+	// sample positions that match CTDB's expectations (offset by pregap)
+	ctdbCh := startCTDBQuery(ctx, layout.TOCString())
+
+	// WAIT for CTDB result to detect pregap BEFORE audio processing
+	tocID, tocErr := layout.TOCID()
+	ctdbRes := <-ctdbCh
+	if ctdbRes.err != nil {
+		if ctdbRes.err == network.ErrNotFound {
+			if tocErr != nil {
+				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
+			} else {
+				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
+			}
+			return fmt.Errorf("no CTDB entries found for this disc")
+		}
+		return fmt.Errorf("CTDB lookup failed: %w", ctdbRes.err)
+	}
+	resp := ctdbRes.resp
+
+	// Print pregap info if detected (but don't apply to layout yet - that's done after audio processing)
+	if ctdbRes.detectedPregap > 0 {
+		fmt.Printf("Pregap length %s.\n", formatFramesAsTime(ctdbRes.detectedPregap))
+	}
+
+	// Print "found" message
+	if tocErr != nil {
+		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
+	} else {
+		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
+	}
+
+	// NOW start parity fetch (from already-received CTDB result)
+	// This runs in parallel with audio processing below
+	parityCh := startParityFetchFromResult(ctx, ctdbRes)
+
+	// Compute lastStride with corrected layout (now includes pregap)
 	finalSampleCount := layout.AudioLengthFrames() * 588
 	pregap := 0
 	if len(layout.Tracks) > 0 {
@@ -1489,13 +1605,6 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		sampleCache = ingest.NewSampleCache(int64(finalSampleCount))
 	}
 
-	// Start CTDB query AND parity fetch in background (chained)
-	// This overlaps network I/O with CPU-bound audio processing
-	// Parity fetching starts automatically as soon as CTDB lookup completes
-	// We get two channels: one for immediate CTDB notification, one for parity data
-	ctdbCh := startCTDBQuery(ctx, layout.TOCString())
-	ctdbNotifyCh, parityCh := startParityFetch(ctx, ctdbCh)
-
 	// Create progress reporter
 	var reporter *progress.Reporter
 	if opts.ShowProgress {
@@ -1505,7 +1614,7 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		)
 	}
 
-	// Process audio (parity fetch runs in parallel!)
+	// Process audio with CORRECTED layout (parity fetch runs in parallel!)
 	processOpts := ingest.ProcessOptions{
 		Stride:           opts.Stride,
 		LastStride:       lastStride,
@@ -1531,28 +1640,16 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		return fmt.Errorf("failed to process audio: %w", err)
 	}
 
-	// Get CTDB result (should be ready by now, or very soon)
-	tocID, tocErr := layout.TOCID()
-
-	ctdbRes := <-ctdbNotifyCh
-	if ctdbRes.err != nil {
-		if ctdbRes.err == network.ErrNotFound {
-			if tocErr != nil {
-				fmt.Printf("[CTDB TOCID: (error: %v)] not found.\n", tocErr)
-			} else {
-				fmt.Printf("[CTDB TOCID: %s] not found.\n", tocID)
-			}
-			return fmt.Errorf("no CTDB entries found for this disc")
+	// Apply detected pregap correction AFTER audio processing
+	// This adjusts track positions for TOCID matching. DON'T set Tracks[0].Pregap
+	// because the detected pregap is a TOC-level offset, not actual audio content.
+	// Setting Pregap would incorrectly affect repair calculations (stridecount,
+	// error positions), causing corrections to be applied at wrong sample positions.
+	if ctdbRes.detectedPregap > 0 {
+		for i := range layout.Tracks {
+			layout.Tracks[i].Start += ctdbRes.detectedPregap
 		}
-		return fmt.Errorf("CTDB lookup failed: %w", ctdbRes.err)
-	}
-	resp := ctdbRes.resp
-
-	// Print "found" immediately - parity may still be fetching
-	if tocErr != nil {
-		fmt.Printf("[CTDB TOCID: (error: %v)] found.\n", tocErr)
-	} else {
-		fmt.Printf("[CTDB TOCID: %s] found.\n", tocID)
+		layout.Leadout += ctdbRes.detectedPregap
 	}
 
 	// Wait for parity data (may already be complete)
@@ -1716,6 +1813,11 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 			status = fmt.Sprintf("Repaired %d samples", tr.ErrorCount)
 		}
 		fmt.Printf(" %02d   | %s\n", tr.Track, status)
+	}
+
+	// Display pregap info if present
+	if layout.Tracks[0].Pregap > 0 {
+		fmt.Printf("\nPregap: %s\n", formatFramesAsTime(layout.Tracks[0].Pregap))
 	}
 
 	if opts.DryRun {

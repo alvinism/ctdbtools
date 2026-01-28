@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -164,4 +165,75 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ParseTOCString parses a CTDB TOC string into track start frames.
+// TOC format: "{-}{start}:{-}{start}:...:{leadout}" where "-" prefix indicates non-audio.
+func ParseTOCString(tocStr string) ([]int, error) {
+	if tocStr == "" {
+		return nil, fmt.Errorf("empty TOC string")
+	}
+	parts := strings.Split(tocStr, ":")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid TOC string: too few parts")
+	}
+	frames := make([]int, len(parts))
+	for i, p := range parts {
+		// Handle "-" prefix for non-audio tracks
+		p = strings.TrimPrefix(p, "-")
+		val, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid frame value at position %d: %w", i, err)
+		}
+		frames[i] = val
+	}
+	return frames, nil
+}
+
+// DetectPregapFromTOC compares two TOC strings and returns the pregap difference.
+// Returns the difference in first track position (ctdb[0] - local[0]).
+// A positive result means CTDB has a pregap that our local TOC is missing.
+func DetectPregapFromTOC(localTOC, ctdbTOC string) int {
+	local, err := ParseTOCString(localTOC)
+	if err != nil || len(local) == 0 {
+		return 0
+	}
+	ctdb, err := ParseTOCString(ctdbTOC)
+	if err != nil || len(ctdb) == 0 {
+		return 0
+	}
+	// Pregap = difference in first track position
+	return ctdb[0] - local[0]
+}
+
+// ApplyPregap applies a pregap correction to a layout.
+// This adjusts all track start positions and the leadout by the pregap amount.
+// The pregap is recorded in the first track's Pregap field.
+func (l *Layout) ApplyPregap(pregap int) {
+	if pregap <= 0 || len(l.Tracks) == 0 {
+		return
+	}
+	for i := range l.Tracks {
+		l.Tracks[i].Start += pregap
+	}
+	l.Tracks[0].Pregap = pregap
+	l.Leadout += pregap
+}
+
+// AdjustTOCByPregap creates a new TOC string with the given pregap applied.
+// This is useful for trying different pregap values against the CTDB database.
+func AdjustTOCByPregap(tocStr string, pregap int) string {
+	frames, err := ParseTOCString(tocStr)
+	if err != nil || len(frames) == 0 {
+		return tocStr
+	}
+
+	var b strings.Builder
+	for i, f := range frames {
+		if i > 0 {
+			b.WriteString(":")
+		}
+		b.WriteString(strconv.Itoa(f + pregap))
+	}
+	return b.String()
 }

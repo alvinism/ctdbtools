@@ -393,6 +393,18 @@ func ParseCueSheetFile(path string) (CueSheet, error) {
 		return CueSheet{}, err
 	}
 	sheet.CuePath = path
+
+	// Validate that referenced audio files exist
+	for _, src := range sheet.Sources {
+		audioPath := src.FilePath
+		if !filepath.IsAbs(audioPath) {
+			audioPath = filepath.Join(cueDir, audioPath)
+		}
+		if _, err := os.Stat(audioPath); err != nil {
+			return CueSheet{}, fmt.Errorf("audio file not found: %s", src.FilePath)
+		}
+	}
+
 	return sheet, nil
 }
 

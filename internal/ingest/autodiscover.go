@@ -29,38 +29,44 @@ var trackNumberRegex = regexp.MustCompile(`^(\d+)`)
 // If a CUE file is found in the directory, it uses that instead.
 // Otherwise, it auto-discovers numbered audio files and builds a layout from their durations.
 func DiscoverDirectory(ctx context.Context, dirPath string) (CueSheet, error) {
-	// First, check if there's a CUE file in the directory
+	// First, check if there are CUE files in the directory
 	// We use ReadDir instead of Glob because Glob has issues with special characters like [ and ]
-	cueFile, err := findCueFile(dirPath)
+	cueFiles, err := findCueFiles(dirPath)
 	if err != nil {
 		return CueSheet{}, fmt.Errorf("failed to search for CUE files: %w", err)
 	}
 
-	if cueFile != "" {
-		return ParseCueSheetFile(cueFile)
+	// Try each CUE file until one parses successfully
+	for _, cueFile := range cueFiles {
+		sheet, err := ParseCueSheetFile(cueFile)
+		if err == nil {
+			return sheet, nil
+		}
+		// Continue to next CUE file if this one fails
 	}
 
-	// No CUE file found - auto-discover audio files
+	// No valid CUE file found - auto-discover audio files
 	return discoverAudioFiles(ctx, dirPath)
 }
 
-// findCueFile searches for a .cue file in the given directory
-func findCueFile(dirPath string) (string, error) {
+// findCueFiles searches for all .cue files in the given directory
+func findCueFiles(dirPath string) ([]string, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
+	var cueFiles []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		if strings.HasSuffix(strings.ToLower(name), ".cue") {
-			return filepath.Join(dirPath, name), nil
+			cueFiles = append(cueFiles, filepath.Join(dirPath, name))
 		}
 	}
-	return "", nil
+	return cueFiles, nil
 }
 
 // discoverAudioFiles scans for audio files and builds a CueSheet from them
