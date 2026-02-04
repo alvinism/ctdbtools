@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/parity"
 	"ctdbtools/internal/toc"
 )
@@ -306,7 +307,7 @@ FILE "03 - Third Track.flac" WAVE
 		"03 - Third Track.wav",
 	}
 
-	if err := transformCueSheet(originalPath, outputPath, newRefs); err != nil {
+	if err := transformCueSheet(originalPath, outputPath, newRefs, audio.FormatWAV); err != nil {
 		t.Fatalf("transformCueSheet failed: %v", err)
 	}
 

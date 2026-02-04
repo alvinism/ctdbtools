@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
 	"ctdbtools/internal/logparse"
 	"ctdbtools/internal/network"
@@ -1486,6 +1487,10 @@ type RepairOptions struct {
 	Force        bool
 	Verbose      bool
 	ShowProgress bool
+	Format       audio.OutputFormat      // Output format (wav, flac)
+	Encoder      audio.EncoderPreference // FLAC encoder preference
+	Compression  int                     // FLAC compression level 0-8
+	CopyMetadata bool                    // Copy metadata from source files
 }
 
 // Repair runs the repair process on an audio file using CTDB parity data.
@@ -1797,6 +1802,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		OriginalCuePath: originalCuePath,
 		IsSplitTrack:    isSplitTrack,
 		SourceFiles:     sourceFiles,
+		Format:          opts.Format,
+		Encoder:         opts.Encoder,
+		Compression:     opts.Compression,
+		CopyMetadata:    opts.CopyMetadata,
 	}
 
 	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)
@@ -1832,14 +1841,14 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	fmt.Printf("\nOutput files written to %s:\n", opts.OutputDir)
-	if len(outputFiles.WAVPaths) > 1 {
-		// Split-track mode: show all WAV files
-		for _, wavPath := range outputFiles.WAVPaths {
-			fmt.Printf("  - %s\n", filepath.Base(wavPath))
+	if len(outputFiles.AudioPaths) > 1 {
+		// Split-track mode: show all audio files
+		for _, audioPath := range outputFiles.AudioPaths {
+			fmt.Printf("  - %s\n", filepath.Base(audioPath))
 		}
 	} else {
 		// Single-file mode
-		fmt.Printf("  - %s\n", filepath.Base(outputFiles.WAVPath))
+		fmt.Printf("  - %s\n", filepath.Base(outputFiles.AudioPath))
 	}
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.CUEPath))
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.LogPath))

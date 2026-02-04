@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
 
 	"github.com/spf13/cobra"
@@ -55,9 +56,9 @@ The repair process:
   4. Applies XOR corrections to produce corrected output
 
 Output is written to a directory containing:
-  - album.wav - Corrected audio (44.1kHz, 16-bit, stereo)
-  - album.cue - CUE sheet with track indices
-  - album.log - Repair log with details
+  - Corrected audio files (FLAC by default, or WAV with --format wav)
+  - CUE sheet
+  - Repair log with details
 
 Use --dry-run to see what would be repaired without writing files.`,
 	Args: cobra.ExactArgs(1),
@@ -82,11 +83,15 @@ var (
 
 // Repair command flags
 var (
-	repairOutput   string
-	repairAuto     bool
-	repairDryRun   bool
-	repairForce    bool
-	repairVerbose  bool
+	repairOutput       string
+	repairAuto         bool
+	repairDryRun       bool
+	repairForce        bool
+	repairVerbose      bool
+	repairFormat       string
+	repairEncoder      string
+	repairCompression  int
+	repairCopyMetadata bool
 )
 
 func init() {
@@ -121,6 +126,12 @@ func init() {
 	repairCmd.Flags().BoolVarP(&repairVerbose, "verbose", "v", false, "Verbose output")
 	repairCmd.Flags().BoolVar(&flagProgress, "progress", false, "Show progress bar (default: auto-detect terminal)")
 	repairCmd.Flags().BoolVar(&flagNoProgress, "no-progress", false, "Disable progress bar")
+
+	// Output format flags
+	repairCmd.Flags().StringVar(&repairFormat, "format", "flac", "Output format: flac, wav")
+	repairCmd.Flags().StringVar(&repairEncoder, "encoder", "auto", "FLAC encoder: auto, native, ffmpeg")
+	repairCmd.Flags().IntVar(&repairCompression, "compression", 8, "FLAC compression level 0-8")
+	repairCmd.Flags().BoolVar(&repairCopyMetadata, "copy-metadata", true, "Copy metadata from source files")
 
 	rootCmd.AddCommand(repairCmd)
 }
@@ -265,6 +276,23 @@ func runRepair(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
+	// Parse output format
+	format, err := audio.ParseOutputFormat(repairFormat)
+	if err != nil {
+		return err
+	}
+
+	// Parse encoder preference
+	encoder, err := audio.ParseEncoderPreference(repairEncoder)
+	if err != nil {
+		return err
+	}
+
+	// Validate compression level
+	if repairCompression < 0 || repairCompression > 8 {
+		return fmt.Errorf("compression level must be 0-8, got %d", repairCompression)
+	}
+
 	opts := RepairOptions{
 		CuePath:      cueFile,
 		DirPath:      dirPath,
@@ -276,6 +304,10 @@ func runRepair(cmd *cobra.Command, args []string) error {
 		Force:        repairForce,
 		Verbose:      repairVerbose,
 		ShowProgress: shouldShowProgress(),
+		Format:       format,
+		Encoder:      encoder,
+		Compression:  repairCompression,
+		CopyMetadata: repairCopyMetadata,
 	}
 
 	return Repair(ctx, opts)

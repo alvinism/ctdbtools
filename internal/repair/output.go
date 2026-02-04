@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/toc"
 	"ctdbtools/internal/version"
 )
@@ -16,30 +18,43 @@ import (
 func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout, opts RepairOptions) (*OutputFiles, error) {
 	files := &OutputFiles{}
 
+	// Determine output format extension
+	format := opts.Format
+	if format == "" {
+		format = audio.FormatWAV
+	}
+	ext := format.Extension()
+
 	// Determine base name for output files (preserve original CUE filename if available)
 	baseName := "album"
 	if opts.OriginalCuePath != "" {
 		cueBase := filepath.Base(opts.OriginalCuePath)
-		ext := filepath.Ext(cueBase)
-		baseName = cueBase[:len(cueBase)-len(ext)]
+		cueExt := filepath.Ext(cueBase)
+		baseName = cueBase[:len(cueBase)-len(cueExt)]
 	}
 
 	// Set file paths based on split-track vs single-file mode
 	if opts.IsSplitTrack {
-		// Split-track mode: derive WAV filenames from original source files
-		files.WAVPaths = make([]string, len(opts.SourceFiles))
+		// Split-track mode: derive filenames from original source files
+		files.AudioPaths = make([]string, len(opts.SourceFiles))
 		for i, sourcePath := range opts.SourceFiles {
-			wavName := deriveOutputFilename(sourcePath, i+1)
-			files.WAVPaths[i] = filepath.Join(outputDir, wavName)
+			audioName := deriveOutputFilenameWithExt(sourcePath, i+1, ext)
+			files.AudioPaths[i] = filepath.Join(outputDir, audioName)
 		}
-		// Set WAVPath to first file for backwards compatibility
-		if len(files.WAVPaths) > 0 {
-			files.WAVPath = files.WAVPaths[0]
+		// Set AudioPath to first file for convenience
+		if len(files.AudioPaths) > 0 {
+			files.AudioPath = files.AudioPaths[0]
 		}
+		// Backwards compatibility
+		files.WAVPaths = files.AudioPaths
+		files.WAVPath = files.AudioPath
 	} else {
 		// Single-file mode
-		files.WAVPath = filepath.Join(outputDir, baseName+".wav")
-		files.WAVPaths = []string{files.WAVPath}
+		files.AudioPath = filepath.Join(outputDir, baseName+ext)
+		files.AudioPaths = []string{files.AudioPath}
+		// Backwards compatibility
+		files.WAVPath = files.AudioPath
+		files.WAVPaths = files.AudioPaths
 	}
 
 	files.CUEPath = filepath.Join(outputDir, baseName+".cue")
@@ -51,14 +66,14 @@ func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout,
 		// Transform original CUE to preserve metadata
 		var newFileRefs []string
 		if opts.IsSplitTrack {
-			// Use the new WAV filenames (just base names for CUE)
-			for _, p := range files.WAVPaths {
+			// Use the new audio filenames (just base names for CUE)
+			for _, p := range files.AudioPaths {
 				newFileRefs = append(newFileRefs, filepath.Base(p))
 			}
 		} else {
-			newFileRefs = []string{baseName + ".wav"}
+			newFileRefs = []string{baseName + ext}
 		}
-		cueErr = transformCueSheet(opts.OriginalCuePath, files.CUEPath, newFileRefs)
+		cueErr = transformCueSheet(opts.OriginalCuePath, files.CUEPath, newFileRefs, format)
 		if cueErr != nil {
 			fmt.Printf("Warning: failed to transform CUE sheet: %v, generating new one\n", cueErr)
 		}
@@ -68,15 +83,15 @@ func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout,
 	if opts.OriginalCuePath == "" || cueErr != nil {
 		if opts.IsSplitTrack {
 			// Generate split-track CUE
-			var wavNames []string
-			for _, p := range files.WAVPaths {
-				wavNames = append(wavNames, filepath.Base(p))
+			var audioNames []string
+			for _, p := range files.AudioPaths {
+				audioNames = append(audioNames, filepath.Base(p))
 			}
-			if err := writeCueSheetSplitTrack(files.CUEPath, wavNames, layout); err != nil {
+			if err := writeCueSheetSplitTrack(files.CUEPath, audioNames, layout, format); err != nil {
 				return files, fmt.Errorf("failed to write CUE sheet: %w", err)
 			}
 		} else {
-			if err := writeCueSheet(files.CUEPath, baseName+".wav", layout); err != nil {
+			if err := writeCueSheet(files.CUEPath, baseName+ext, layout, format); err != nil {
 				return files, fmt.Errorf("failed to write CUE sheet: %w", err)
 			}
 		}
@@ -90,9 +105,19 @@ func WriteOutputFiles(outputDir string, result *RepairResult, layout toc.Layout,
 	return files, nil
 }
 
+// deriveOutputFilenameWithExt derives the output filename from original source path with specified extension.
+func deriveOutputFilenameWithExt(originalPath string, trackNum int, ext string) string {
+	if originalPath == "" {
+		return fmt.Sprintf("%02d%s", trackNum, ext)
+	}
+	base := filepath.Base(originalPath)
+	origExt := filepath.Ext(base)
+	return strings.TrimSuffix(base, origExt) + ext
+}
+
 // transformCueSheet reads the original CUE file and transforms FILE references
-// to point to the new WAV files while preserving all other metadata.
-func transformCueSheet(originalPath, outputPath string, newFileRefs []string) error {
+// to point to the new audio files while preserving all other metadata.
+func transformCueSheet(originalPath, outputPath string, newFileRefs []string, format audio.OutputFormat) error {
 	inFile, err := os.Open(originalPath)
 	if err != nil {
 		return fmt.Errorf("failed to open original CUE: %w", err)
@@ -109,6 +134,9 @@ func transformCueSheet(originalPath, outputPath string, newFileRefs []string) er
 	// Captures: prefix, filename (with quotes), type
 	fileRegex := regexp.MustCompile(`^(\s*FILE\s+)"([^"]+)"(\s+\w+.*)$`)
 
+	// Determine file type for CUE (WAVE or FLAC)
+	fileType := cueFileType(format)
+
 	scanner := bufio.NewScanner(inFile)
 	writer := bufio.NewWriter(outFile)
 	defer writer.Flush()
@@ -118,10 +146,10 @@ func transformCueSheet(originalPath, outputPath string, newFileRefs []string) er
 		line := scanner.Text()
 
 		if matches := fileRegex.FindStringSubmatch(line); matches != nil {
-			// This is a FILE directive - replace the filename
+			// This is a FILE directive - replace the filename and type
 			if fileIdx < len(newFileRefs) {
-				// Reconstruct with new filename
-				newLine := fmt.Sprintf("%s\"%s\"%s", matches[1], newFileRefs[fileIdx], matches[3])
+				// Reconstruct with new filename and correct type
+				newLine := fmt.Sprintf("%s\"%s\" %s", matches[1], newFileRefs[fileIdx], fileType)
 				writer.WriteString(newLine + "\n")
 				fileIdx++
 			} else {
@@ -143,12 +171,16 @@ func transformCueSheet(originalPath, outputPath string, newFileRefs []string) er
 
 // writeCueSheetSplitTrack generates a CUE sheet for split-track output.
 // Each track gets its own FILE directive.
-func writeCueSheetSplitTrack(path string, wavFiles []string, layout toc.Layout) error {
+func writeCueSheetSplitTrack(path string, audioFiles []string, layout toc.Layout, format audio.OutputFormat) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	// Determine file type for CUE
+	fileType := cueFileType(format)
+	ext := format.Extension()
 
 	// Write CUE header
 	fmt.Fprintf(f, "REM Generated by ctdbtools %s\n", version.Version)
@@ -162,10 +194,10 @@ func writeCueSheetSplitTrack(path string, wavFiles []string, layout toc.Layout) 
 		}
 		trackNum++
 
-		if trackNum-1 < len(wavFiles) {
-			fmt.Fprintf(f, "FILE \"%s\" WAVE\n", wavFiles[trackNum-1])
+		if trackNum-1 < len(audioFiles) {
+			fmt.Fprintf(f, "FILE \"%s\" %s\n", audioFiles[trackNum-1], fileType)
 		} else {
-			fmt.Fprintf(f, "FILE \"%02d.wav\" WAVE\n", trackNum)
+			fmt.Fprintf(f, "FILE \"%02d%s\" %s\n", trackNum, ext, fileType)
 		}
 
 		fmt.Fprintf(f, "  TRACK %02d AUDIO\n", i+1)
@@ -188,17 +220,20 @@ func writeCueSheetSplitTrack(path string, wavFiles []string, layout toc.Layout) 
 }
 
 // writeCueSheet generates a CUE sheet for the repaired audio.
-func writeCueSheet(path, wavFileName string, layout toc.Layout) error {
+func writeCueSheet(path, audioFileName string, layout toc.Layout, format audio.OutputFormat) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
+	// Determine file type for CUE
+	fileType := cueFileType(format)
+
 	// Write CUE header
 	fmt.Fprintf(f, "REM Generated by ctdbtools %s\n", version.Version)
 	fmt.Fprintf(f, "REM Repaired audio file\n")
-	fmt.Fprintf(f, "FILE \"%s\" WAVE\n", wavFileName)
+	fmt.Fprintf(f, "FILE \"%s\" %s\n", audioFileName, fileType)
 
 	// Write track entries
 	for i, track := range layout.Tracks {
@@ -223,6 +258,16 @@ func writeCueSheet(path, wavFileName string, layout toc.Layout) error {
 	}
 
 	return nil
+}
+
+// cueFileType returns the CUE sheet file type keyword for the given format.
+func cueFileType(format audio.OutputFormat) string {
+	switch format {
+	case audio.FormatFLAC:
+		return "FLAC"
+	default:
+		return "WAVE"
+	}
 }
 
 // writeRepairLog generates a detailed repair log.

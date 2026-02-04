@@ -10,6 +10,7 @@ import (
 
 	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
+	"ctdbtools/internal/metadata"
 	"ctdbtools/internal/parity"
 	"ctdbtools/internal/progress"
 	"ctdbtools/internal/toc"
@@ -24,7 +25,7 @@ import (
 // If opts.SampleCache is provided and populated, uses cached samples instead of
 // re-decoding with FFmpeg (significantly faster).
 //
-// Returns the list of output WAV file paths (single file for single-file mode,
+// Returns the list of output audio file paths (single file for single-file mode,
 // multiple files for split-track mode).
 func ApplyCorrections(
 	ctx context.Context,
@@ -43,20 +44,54 @@ func ApplyCorrections(
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	// Determine output format
+	format := opts.Format
+	if format == "" {
+		format = audio.FormatWAV
+	}
+	ext := format.Extension()
+
+	// Extract metadata from source files if requested
+	var albumMetadata *audio.Metadata
+	if opts.CopyMetadata && len(opts.SourceFiles) > 0 {
+		// Resolve source file paths relative to input directory
+		inputDir := inputPath
+		if info, err := os.Stat(inputPath); err == nil && !info.IsDir() {
+			inputDir = filepath.Dir(inputPath)
+		}
+		resolvedPaths := make([]string, len(opts.SourceFiles))
+		for i, f := range opts.SourceFiles {
+			if filepath.IsAbs(f) {
+				resolvedPaths[i] = f
+			} else {
+				resolvedPaths[i] = filepath.Join(inputDir, f)
+			}
+		}
+
+		if opts.IsSplitTrack {
+			// Extract per-track metadata for split-track mode
+			opts.PerTrackMetadata = metadata.ExtractFromFiles(ctx, resolvedPaths)
+			// Also extract album metadata from first file for fallback
+			albumMetadata = metadata.ExtractFromFirstFile(ctx, resolvedPaths)
+		} else {
+			albumMetadata = metadata.ExtractFromFirstFile(ctx, resolvedPaths)
+		}
+	}
+
 	// Use cached samples if available (avoids second FFmpeg decode pass)
 	if opts.SampleCache != nil && opts.SampleCache.Length() > 0 {
 		// Split-track mode with cached samples
 		if opts.IsSplitTrack {
-			return applyCorrectionsCachedSplitTrack(ctx, opts.SampleCache, outputDir, corrections, layout, reporter, opts)
+			return applyCorrectionsCachedSplitTrack(ctx, opts.SampleCache, outputDir, corrections, layout, reporter, opts, albumMetadata)
 		}
 
 		// Single-file mode with cached samples
-		wavPath := filepath.Join(outputDir, "album.wav")
-		if _, err := os.Stat(wavPath); err == nil && !opts.Force {
-			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPath)
+		audioPath := filepath.Join(outputDir, "album"+ext)
+		if _, err := os.Stat(audioPath); err == nil && !opts.Force {
+			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", audioPath)
 		}
 
-		writer, err := audio.NewWAVWriter(wavPath)
+		writer, err := createWriter(audioPath, opts, albumMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -65,18 +100,18 @@ func ApplyCorrections(
 		if err := applyCorrectionsCached(ctx, opts.SampleCache, writer, corrections, reporter, totalSamples); err != nil {
 			return nil, err
 		}
-		return []string{wavPath}, nil
+		return []string{audioPath}, nil
 	}
 
 	// Fall back to FFmpeg-based correction (original path)
 	// Check if output already exists
-	wavPath := filepath.Join(outputDir, "album.wav")
-	if _, err := os.Stat(wavPath); err == nil && !opts.Force {
-		return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPath)
+	audioPath := filepath.Join(outputDir, "album"+ext)
+	if _, err := os.Stat(audioPath); err == nil && !opts.Force {
+		return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", audioPath)
 	}
 
-	// Create WAV writer
-	writer, err := audio.NewWAVWriter(wavPath)
+	// Create writer with format support
+	writer, err := createWriter(audioPath, opts, albumMetadata)
 	if err != nil {
 		return nil, err
 	}
@@ -106,19 +141,36 @@ func ApplyCorrections(
 		if err := applyCorrectionsSplitTrack(ctx, sheet, writer, corrections, reporter, totalSamples, layout.AudioTracks); err != nil {
 			return nil, err
 		}
-		return []string{wavPath}, nil
+		return []string{audioPath}, nil
 	}
 
 	// Single file mode
-	audioPath := sheet.Sources[0].FilePath
-	if audioPath != "" && sheet.CueDir != "" {
-		audioPath = filepath.Join(sheet.CueDir, audioPath)
+	srcAudioPath := sheet.Sources[0].FilePath
+	if srcAudioPath != "" && sheet.CueDir != "" {
+		srcAudioPath = filepath.Join(sheet.CueDir, srcAudioPath)
 	}
 
-	if err := applyCorrectionsSingleFile(ctx, audioPath, writer, corrections, reporter, totalSamples); err != nil {
+	if err := applyCorrectionsSingleFile(ctx, srcAudioPath, writer, corrections, reporter, totalSamples); err != nil {
 		return nil, err
 	}
-	return []string{wavPath}, nil
+	return []string{audioPath}, nil
+}
+
+// createWriter creates an AudioWriter with the appropriate format and metadata.
+func createWriter(path string, opts RepairOptions, meta *audio.Metadata) (audio.AudioWriter, error) {
+	format := opts.Format
+	if format == "" {
+		format = audio.FormatWAV
+	}
+
+	writerOpts := audio.WriterOptions{
+		Format:      format,
+		Encoder:     opts.Encoder,
+		Metadata:    meta,
+		Compression: opts.Compression,
+	}
+
+	return audio.NewWriter(path, writerOpts)
 }
 
 // applyCorrectionsCached applies corrections using cached samples instead of FFmpeg.
@@ -126,7 +178,7 @@ func ApplyCorrections(
 func applyCorrectionsCached(
 	ctx context.Context,
 	cache *ingest.SampleCache,
-	writer *audio.WAVWriter,
+	writer audio.AudioWriter,
 	corrections []parity.ErrorCorrection,
 	reporter *progress.Reporter,
 	totalSamples int64,
@@ -177,7 +229,7 @@ func applyCorrectionsCached(
 		}
 
 		// Write entire buffer at once
-		if err := writer.WriteSamplesBulk(buf[:n]); err != nil {
+		if err := writer.WriteSamples(buf[:n]); err != nil {
 			return fmt.Errorf("failed to write samples: %w", err)
 		}
 
@@ -204,7 +256,7 @@ func applyCorrectionsCached(
 }
 
 // applyCorrectionsCachedSplitTrack applies corrections using cached samples for split-track mode.
-// Creates separate WAV files for each track, preserving original filenames.
+// Creates separate audio files for each track, preserving original filenames.
 func applyCorrectionsCachedSplitTrack(
 	ctx context.Context,
 	cache *ingest.SampleCache,
@@ -213,22 +265,30 @@ func applyCorrectionsCachedSplitTrack(
 	layout toc.Layout,
 	reporter *progress.Reporter,
 	opts RepairOptions,
+	albumMetadata *audio.Metadata,
 ) ([]string, error) {
 	reader := cache.Reader()
 
+	// Determine output format extension
+	format := opts.Format
+	if format == "" {
+		format = audio.FormatWAV
+	}
+	ext := format.Extension()
+
 	// Prepare output paths
-	wavPaths := make([]string, layout.AudioTracks)
+	audioPaths := make([]string, layout.AudioTracks)
 	for i := 0; i < layout.AudioTracks; i++ {
 		var sourcePath string
 		if i < len(opts.SourceFiles) {
 			sourcePath = opts.SourceFiles[i]
 		}
-		wavName := deriveOutputFilename(sourcePath, i+1)
-		wavPaths[i] = filepath.Join(outputDir, wavName)
+		audioName := deriveOutputFilenameWithFormat(sourcePath, i+1, ext)
+		audioPaths[i] = filepath.Join(outputDir, audioName)
 
 		// Check if file already exists
-		if _, err := os.Stat(wavPaths[i]); err == nil && !opts.Force {
-			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", wavPaths[i])
+		if _, err := os.Stat(audioPaths[i]); err == nil && !opts.Force {
+			return nil, fmt.Errorf("output file already exists: %s (use --force to overwrite)", audioPaths[i])
 		}
 	}
 
@@ -239,10 +299,28 @@ func applyCorrectionsCachedSplitTrack(
 
 	// Process each track
 	for trackNum := 1; trackNum <= layout.AudioTracks; trackNum++ {
-		// Create WAV writer for this track
-		writer, err := audio.NewWAVWriter(wavPaths[trackNum-1])
+		// Get metadata for this specific track
+		var trackMeta *audio.Metadata
+		trackIdx := trackNum - 1
+
+		if trackIdx < len(opts.PerTrackMetadata) && opts.PerTrackMetadata[trackIdx] != nil {
+			// Use per-track metadata from source file
+			trackMeta = opts.PerTrackMetadata[trackIdx].Clone()
+		} else if albumMetadata != nil {
+			// Fall back to album metadata
+			trackMeta = albumMetadata.Clone()
+		}
+
+		// Always ensure track number is set
+		if trackMeta != nil {
+			trackMeta.Set("TRACKNUMBER", fmt.Sprintf("%d", trackNum))
+			trackMeta.Set("TOTALTRACKS", fmt.Sprintf("%d", layout.AudioTracks))
+		}
+
+		// Create writer for this track
+		writer, err := createWriterWithMetadata(audioPaths[trackNum-1], opts, trackMeta)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create WAV file for track %d: %w", trackNum, err)
+			return nil, fmt.Errorf("failed to create audio file for track %d: %w", trackNum, err)
 		}
 
 		// Calculate samples for this track
@@ -303,7 +381,7 @@ func applyCorrectionsCachedSplitTrack(
 			}
 
 			// Write to track file
-			if err := writer.WriteSamplesBulk(buf[:n]); err != nil {
+			if err := writer.WriteSamples(buf[:n]); err != nil {
 				writer.Close()
 				return nil, fmt.Errorf("failed to write samples for track %d: %w", trackNum, err)
 			}
@@ -336,7 +414,34 @@ func applyCorrectionsCachedSplitTrack(
 			len(corrections)-corrIdx, globalSampleIdx*2, corrections[corrIdx].Position)
 	}
 
-	return wavPaths, nil
+	return audioPaths, nil
+}
+
+// createWriterWithMetadata creates an AudioWriter with specified metadata.
+func createWriterWithMetadata(path string, opts RepairOptions, meta *audio.Metadata) (audio.AudioWriter, error) {
+	format := opts.Format
+	if format == "" {
+		format = audio.FormatWAV
+	}
+
+	writerOpts := audio.WriterOptions{
+		Format:      format,
+		Encoder:     opts.Encoder,
+		Metadata:    meta,
+		Compression: opts.Compression,
+	}
+
+	return audio.NewWriter(path, writerOpts)
+}
+
+// deriveOutputFilenameWithFormat derives the output filename from original source path with specified extension.
+func deriveOutputFilenameWithFormat(originalPath string, trackNum int, ext string) string {
+	if originalPath == "" {
+		return fmt.Sprintf("%02d%s", trackNum, ext)
+	}
+	base := filepath.Base(originalPath)
+	origExt := filepath.Ext(base)
+	return strings.TrimSuffix(base, origExt) + ext
 }
 
 // deriveOutputFilename derives the output WAV filename from original source path.
@@ -354,7 +459,7 @@ func deriveOutputFilename(originalPath string, trackNum int) string {
 func applyCorrectionsSingleFile(
 	ctx context.Context,
 	audioPath string,
-	writer *audio.WAVWriter,
+	writer audio.AudioWriter,
 	corrections []parity.ErrorCorrection,
 	reporter *progress.Reporter,
 	totalSamples int64,
@@ -440,7 +545,7 @@ func applyCorrectionsSingleFile(
 func applyCorrectionsSplitTrack(
 	ctx context.Context,
 	sheet ingest.CueSheet,
-	writer *audio.WAVWriter,
+	writer audio.AudioWriter,
 	corrections []parity.ErrorCorrection,
 	reporter *progress.Reporter,
 	totalSamples int64,
@@ -496,7 +601,7 @@ func applyCorrectionsSplitTrack(
 func processStreamWithCorrections(
 	ctx context.Context,
 	stream io.Reader,
-	writer *audio.WAVWriter,
+	writer audio.AudioWriter,
 	corrections []parity.ErrorCorrection,
 	corrIdx *int,
 	sampleIdx *int,

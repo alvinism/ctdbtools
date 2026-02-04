@@ -13,6 +13,10 @@ type AudioWriter interface {
 	// WriteSamples writes multiple stereo samples to the file.
 	WriteSamples(samples []uint32) error
 
+	// WriteSamplesBulk writes multiple stereo samples efficiently.
+	// This is faster than WriteSamples for large batches.
+	WriteSamplesBulk(samples []uint32) error
+
 	// Write16BitSample writes a single 16-bit sample (one channel).
 	Write16BitSample(sample uint16) error
 
@@ -30,4 +34,9 @@ type AudioWriter interface {
 
 	// Path returns the output file path.
 	Path() string
+
+	// SetMetadata sets metadata to be written to the output file.
+	// Must be called before Close() for formats that support metadata.
+	// Returns nil for formats that don't support embedded metadata.
+	SetMetadata(meta *Metadata) error
 }

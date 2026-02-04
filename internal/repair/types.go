@@ -13,6 +13,7 @@
 package repair
 
 import (
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
 	"ctdbtools/internal/network"
 	"ctdbtools/internal/parity"
@@ -55,8 +56,10 @@ type RepairCandidate struct {
 
 // OutputFiles contains paths to generated output files.
 type OutputFiles struct {
-	WAVPath         string   // Single-file mode
-	WAVPaths        []string // Split-track mode
+	AudioPath       string   // Single-file mode (primary audio file)
+	AudioPaths      []string // Split-track mode (one per track)
+	WAVPath         string   // Deprecated: use AudioPath
+	WAVPaths        []string // Deprecated: use AudioPaths
 	CUEPath         string
 	LogPath         string
 	AccurateRipPath string
@@ -79,4 +82,13 @@ type RepairOptions struct {
 	OriginalCuePath string              // Path to original CUE file for metadata preservation
 	IsSplitTrack    bool
 	SourceFiles     []string // Original source file paths for preserving filenames
+
+	// Output format options
+	Format       audio.OutputFormat      // Output format (wav, flac)
+	Encoder      audio.EncoderPreference // FLAC encoder preference (auto, native, ffmpeg)
+	Compression  int                     // FLAC compression level 0-8 (default 5)
+	CopyMetadata bool                    // Copy metadata from source files to output
+
+	// Per-track metadata (populated for split-track mode)
+	PerTrackMetadata []*audio.Metadata // Metadata for each source file (split-track mode)
 }
