@@ -289,6 +289,24 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 		}
 	}
 
+	// Validate CD format (44100 Hz sample rate)
+	{
+		var checkPath string
+		if useCueSheet && len(sheet.Sources) > 0 {
+			checkPath = sheet.Sources[0].FilePath
+			if checkPath != "" && sheet.CueDir != "" {
+				checkPath = sheet.CueDir + "/" + checkPath
+			}
+		} else {
+			checkPath = opts.AudioPath
+		}
+		if checkPath != "" {
+			if err := ingest.ValidateCDFormat(ctx, checkPath); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Compute lastStride if not explicitly set (-1 sentinel means auto-compute).
 	// LastStride excludes samples from the end so total length is stride-aligned.
 	// Formula: laststride = stride + ((finalSampleCount - pregap) * 2) % stride
@@ -1346,6 +1364,7 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 
 	// Probe all file durations first
 	fileDurations := make([]int, len(sheet.Sources))
+	fileSamples := make([]int64, len(sheet.Sources))
 	for i, src := range sheet.Sources {
 		if src.FilePath == "" {
 			continue
@@ -1361,6 +1380,12 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 			return fmt.Errorf("failed to probe %s: %w", audioPath, err)
 		}
 		fileDurations[i] = frames
+
+		samples, err := ingest.ProbeSampleCount(ctx, audioPath)
+		if err != nil {
+			return fmt.Errorf("failed to probe sample count of %s: %w", audioPath, err)
+		}
+		fileSamples[i] = samples
 	}
 
 	// For CRC calculation, use FULL FILE durations (including embedded pregaps)
@@ -1383,8 +1408,8 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 			// Track length for TOC = file duration (includes audio + embedded pregap)
 			sheet.Layout.Tracks[i].Length = fileDurations[i]
 
-			// Update ALL source lengths to full file durations
-			sheet.Sources[i].Length = int64(fileDurations[i]) * 588
+			// Use exact sample count for source length to avoid cumulative rounding errors
+			sheet.Sources[i].Length = fileSamples[i]
 
 			cumulativeFrames += fileDurations[i]
 		}
@@ -1555,6 +1580,22 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 				lastTrack := &layout.Tracks[lastIdx]
 				lastTrack.Length = frames - lastTrack.Start
 				layout.Leadout = frames
+			}
+		}
+	}
+
+	// Validate CD format (44100 Hz sample rate)
+	{
+		var checkPath string
+		if useCueSheet && len(sheet.Sources) > 0 {
+			checkPath = sheet.Sources[0].FilePath
+			if checkPath != "" && sheet.CueDir != "" {
+				checkPath = sheet.CueDir + "/" + checkPath
+			}
+		}
+		if checkPath != "" {
+			if err := ingest.ValidateCDFormat(ctx, checkPath); err != nil {
+				return err
 			}
 		}
 	}
