@@ -219,3 +219,11 @@ func (w *WAVWriter) Close() error {
 func (w *WAVWriter) Path() string {
 	return w.file.Name()
 }
+
+// SetMetadata is a no-op for WAV files.
+// WAV files can contain metadata in INFO chunks, but we don't implement that
+// as it's rarely used and not well-supported by audio players.
+func (w *WAVWriter) SetMetadata(meta *Metadata) error {
+	// WAV metadata not implemented - no-op
+	return nil
+}

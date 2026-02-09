@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ctdbtools/internal/accuraterip"
+	"ctdbtools/internal/audio"
 	"ctdbtools/internal/ingest"
 	"ctdbtools/internal/logparse"
 	"ctdbtools/internal/network"
@@ -284,6 +285,24 @@ func Verify(ctx context.Context, opts VerifyOptions) error {
 				lastTrack := &layout.Tracks[lastIdx]
 				lastTrack.Length = frames - lastTrack.Start
 				layout.Leadout = frames
+			}
+		}
+	}
+
+	// Validate CD format (44100 Hz sample rate)
+	{
+		var checkPath string
+		if useCueSheet && len(sheet.Sources) > 0 {
+			checkPath = sheet.Sources[0].FilePath
+			if checkPath != "" && sheet.CueDir != "" {
+				checkPath = sheet.CueDir + "/" + checkPath
+			}
+		} else {
+			checkPath = opts.AudioPath
+		}
+		if checkPath != "" {
+			if err := ingest.ValidateCDFormat(ctx, checkPath); err != nil {
+				return err
 			}
 		}
 	}
@@ -1345,6 +1364,7 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 
 	// Probe all file durations first
 	fileDurations := make([]int, len(sheet.Sources))
+	fileSamples := make([]int64, len(sheet.Sources))
 	for i, src := range sheet.Sources {
 		if src.FilePath == "" {
 			continue
@@ -1360,6 +1380,12 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 			return fmt.Errorf("failed to probe %s: %w", audioPath, err)
 		}
 		fileDurations[i] = frames
+
+		samples, err := ingest.ProbeSampleCount(ctx, audioPath)
+		if err != nil {
+			return fmt.Errorf("failed to probe sample count of %s: %w", audioPath, err)
+		}
+		fileSamples[i] = samples
 	}
 
 	// For CRC calculation, use FULL FILE durations (including embedded pregaps)
@@ -1382,8 +1408,8 @@ func probeSplitTrackDurations(ctx context.Context, sheet *ingest.CueSheet) error
 			// Track length for TOC = file duration (includes audio + embedded pregap)
 			sheet.Layout.Tracks[i].Length = fileDurations[i]
 
-			// Update ALL source lengths to full file durations
-			sheet.Sources[i].Length = int64(fileDurations[i]) * 588
+			// Use exact sample count for source length to avoid cumulative rounding errors
+			sheet.Sources[i].Length = fileSamples[i]
 
 			cumulativeFrames += fileDurations[i]
 		}
@@ -1486,6 +1512,10 @@ type RepairOptions struct {
 	Force        bool
 	Verbose      bool
 	ShowProgress bool
+	Format       audio.OutputFormat      // Output format (wav, flac)
+	Encoder      audio.EncoderPreference // FLAC encoder preference
+	Compression  int                     // FLAC compression level 0-8
+	CopyMetadata bool                    // Copy metadata from source files
 }
 
 // Repair runs the repair process on an audio file using CTDB parity data.
@@ -1550,6 +1580,22 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 				lastTrack := &layout.Tracks[lastIdx]
 				lastTrack.Length = frames - lastTrack.Start
 				layout.Leadout = frames
+			}
+		}
+	}
+
+	// Validate CD format (44100 Hz sample rate)
+	{
+		var checkPath string
+		if useCueSheet && len(sheet.Sources) > 0 {
+			checkPath = sheet.Sources[0].FilePath
+			if checkPath != "" && sheet.CueDir != "" {
+				checkPath = sheet.CueDir + "/" + checkPath
+			}
+		}
+		if checkPath != "" {
+			if err := ingest.ValidateCDFormat(ctx, checkPath); err != nil {
+				return err
 			}
 		}
 	}
@@ -1797,6 +1843,10 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 		OriginalCuePath: originalCuePath,
 		IsSplitTrack:    isSplitTrack,
 		SourceFiles:     sourceFiles,
+		Format:          opts.Format,
+		Encoder:         opts.Encoder,
+		Compression:     opts.Compression,
+		CopyMetadata:    opts.CopyMetadata,
 	}
 
 	result, err := repair.Execute(ctx, proc, selected.Entry, ctdbSyndrome, layout, repairOpts)
@@ -1832,14 +1882,14 @@ func Repair(ctx context.Context, opts RepairOptions) error {
 	}
 
 	fmt.Printf("\nOutput files written to %s:\n", opts.OutputDir)
-	if len(outputFiles.WAVPaths) > 1 {
-		// Split-track mode: show all WAV files
-		for _, wavPath := range outputFiles.WAVPaths {
-			fmt.Printf("  - %s\n", filepath.Base(wavPath))
+	if len(outputFiles.AudioPaths) > 1 {
+		// Split-track mode: show all audio files
+		for _, audioPath := range outputFiles.AudioPaths {
+			fmt.Printf("  - %s\n", filepath.Base(audioPath))
 		}
 	} else {
 		// Single-file mode
-		fmt.Printf("  - %s\n", filepath.Base(outputFiles.WAVPath))
+		fmt.Printf("  - %s\n", filepath.Base(outputFiles.AudioPath))
 	}
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.CUEPath))
 	fmt.Printf("  - %s\n", filepath.Base(outputFiles.LogPath))
