@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -225,6 +226,30 @@ func TestValidateCDFormat(t *testing.T) {
 			t.Errorf("error should mention actual 24-bit, got: %s", msg)
 		}
 	})
+}
+
+// materialsDir returns the absolute path to the materials/repair test fixtures directory.
+func materialsDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("unable to determine test file path")
+	}
+	return filepath.Join(filepath.Dir(file), "..", "..", "materials", "repair")
+}
+
+func TestValidateCDFormat_WMA(t *testing.T) {
+	skipIfNoFFprobe(t)
+	skipIfNoFFmpeg(t)
+	dir := materialsDir(t)
+	wmaDir := filepath.Join(dir, "NEDA-10011")
+	if _, err := os.Stat(wmaDir); os.IsNotExist(err) {
+		t.Skip("materials/repair/NEDA-10011 not available, skipping WMA test")
+	}
+	path := filepath.Join(wmaDir, "01 SAVE ME.wma")
+	if err := ValidateCDFormat(context.Background(), path); err != nil {
+		t.Errorf("ValidateCDFormat(WMA Lossless 16-bit) unexpected error: %v", err)
+	}
 }
 
 func TestValidateCDFormat_NonexistentFile(t *testing.T) {
