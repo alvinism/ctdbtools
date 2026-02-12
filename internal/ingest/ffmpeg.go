@@ -90,11 +90,14 @@ func ProbeSampleRate(ctx context.Context, input string) (int, error) {
 }
 
 // ProbeBitDepth uses ffprobe to get the bit depth of an audio file.
+// It queries both bits_per_raw_sample and bits_per_sample, preferring
+// bits_per_raw_sample when valid (more accurate for FLAC 24-bit).
+// Returns 0, nil when neither field provides a valid depth (metadata unavailable).
 func ProbeBitDepth(ctx context.Context, input string) (int, error) {
 	args := []string{
 		"-v", "error",
 		"-select_streams", "a:0",
-		"-show_entries", "stream=bits_per_raw_sample",
+		"-show_entries", "stream=bits_per_raw_sample,bits_per_sample",
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		input,
 	}
@@ -104,12 +107,21 @@ func ProbeBitDepth(ctx context.Context, input string) (int, error) {
 	if err := cmd.Run(); err != nil {
 		return 0, err
 	}
-	depthStr := strings.TrimSpace(out.String())
-	depth, err := strconv.Atoi(depthStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse bit depth %q: %w", depthStr, err)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var rawDepth, sampleDepth int
+	if len(lines) >= 1 {
+		rawDepth, _ = strconv.Atoi(strings.TrimSpace(lines[0]))
 	}
-	return depth, nil
+	if len(lines) >= 2 {
+		sampleDepth, _ = strconv.Atoi(strings.TrimSpace(lines[1]))
+	}
+	if rawDepth > 0 {
+		return rawDepth, nil
+	}
+	if sampleDepth > 0 {
+		return sampleDepth, nil
+	}
+	return 0, nil
 }
 
 // ProbeEffectiveBitDepth decodes a short segment of audio as s32le and determines
@@ -119,7 +131,7 @@ func ProbeEffectiveBitDepth(ctx context.Context, input string) (int, error) {
 	args := []string{
 		"-v", "error",
 		"-i", input,
-		"-t", "1",
+		"-t", "2",
 		"-f", "s32le",
 		"pipe:1",
 	}
@@ -169,7 +181,8 @@ func ValidateCDFormat(ctx context.Context, path string) error {
 	if depth == 16 {
 		return nil
 	}
-	// Container is >16 bit — check if audio data is effectively 16-bit (padded)
+	// depth > 16: container is >16 bit — check if audio data is effectively 16-bit (padded)
+	// depth == 0: metadata unavailable (e.g. WMA) — must decode to determine bit depth
 	effDepth, err := ProbeEffectiveBitDepth(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to probe audio format of %s: %w", path, err)
@@ -184,12 +197,16 @@ func ValidateCDFormat(ctx context.Context, path string) error {
 // Unlike ProbeDurationFrames (which rounds to CD frames), this returns the exact sample count
 // from container metadata via duration_ts (e.g., FLAC STREAMINFO, WAV data chunk size).
 // No floating-point rounding is involved.
+//
+// Returns 0, nil when the exact sample count cannot be determined from metadata
+// (e.g., WMA uses time_base=1/1000 so duration_ts is in milliseconds, not samples).
+// Callers should fall back to frame-based duration when this returns 0.
 func ProbeSampleCount(ctx context.Context, input string) (int64, error) {
 	args := []string{
 		"-v", "error",
 		"-select_streams", "a:0",
-		"-show_entries", "stream=duration_ts",
-		"-of", "default=noprint_wrappers=1:nokey=1",
+		"-show_entries", "stream=duration_ts,sample_rate,time_base",
+		"-of", "default=noprint_wrappers=1",
 		input,
 	}
 	cmd := exec.CommandContext(ctx, "ffprobe", args...)
@@ -198,12 +215,36 @@ func ProbeSampleCount(ctx context.Context, input string) (int64, error) {
 	if err := cmd.Run(); err != nil {
 		return 0, err
 	}
-	tsStr := strings.TrimSpace(out.String())
-	samples, err := strconv.ParseInt(tsStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse duration_ts %q: %w", tsStr, err)
+	// Parse key=value pairs (output order varies by format)
+	fields := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			fields[k] = v
+		}
 	}
-	return samples, nil
+	durationTS, err := strconv.ParseInt(fields["duration_ts"], 10, 64)
+	if err != nil {
+		return 0, nil
+	}
+	sampleRate, err := strconv.Atoi(fields["sample_rate"])
+	if err != nil || sampleRate <= 0 {
+		return 0, nil
+	}
+	// Parse time_base fraction (e.g., "1/44100")
+	tbParts := strings.SplitN(fields["time_base"], "/", 2)
+	if len(tbParts) != 2 {
+		return 0, nil
+	}
+	tbNum, err1 := strconv.Atoi(tbParts[0])
+	tbDen, err2 := strconv.Atoi(tbParts[1])
+	if err1 != nil || err2 != nil || tbNum != 1 || tbDen <= 0 {
+		return 0, nil
+	}
+	// Only return duration_ts as exact sample count when time_base = 1/sample_rate
+	if tbDen != sampleRate {
+		return 0, nil
+	}
+	return durationTS, nil
 }
 
 // ProbeDurationFrames uses ffprobe to get the duration of an audio file in CD frames (1/75 sec).
